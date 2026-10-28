@@ -1,0 +1,52 @@
+# Upload-Tool auf dem Pi. Starten im Ordner Backend/upload:
+#   docker compose up -d --build
+# Die Werte kommen aus der .env im selben Ordner (Vorlage: .env.example).
+# Details: README → Upload-Tool → Starten.
+
+services:
+  # Verbindet Container 1 mit dem NetBird-Netz. Container 1 teilt sich das
+  # Netzwerk mit diesem Container und ist deshalb nur über NetBird erreichbar.
+  # Auf dem Pi selbst wird kein Port veröffentlicht.
+  netbird:
+    image: netbirdio/netbird:0.81.5
+    hostname: zamaric-upload
+    environment:
+      # Nur für die erste Anmeldung nötig, danach in der .env leeren
+      NB_SETUP_KEY: ${NB_SETUP_KEY:-}
+      NB_HOSTNAME: zamaric-upload
+    # Laut NetBird-Doku nötig für WireGuard (eBPF, Raw Sockets)
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+      - SYS_RESOURCE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      # Anmeldung und Schlüssel des Geräts. Ohne Volume wäre der Container
+      # nach jedem Neustart ein neues Gerät.
+      - netbird-state:/var/lib/netbird
+    restart: unless-stopped
+
+  # Container 1: nginx mit der Website, leitet /api/ an Container 2 weiter
+  website:
+    build: ./website
+    network_mode: service:netbird
+    depends_on:
+      - netbird
+      - api
+    restart: unless-stopped
+
+  # Container 2: Python, nur im internen Docker-Netz erreichbar
+  api:
+    build: ./api
+    # Nur die Variablen, die Container 2 braucht. NB_SETUP_KEY bekommt er nicht.
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
+      SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-120}
+    restart: unless-stopped
+
+volumes:
+  netbird-state:
