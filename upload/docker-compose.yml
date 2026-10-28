@@ -34,6 +34,18 @@ services:
     depends_on:
       - netbird
       - api
+    # Prozesse im Container können sich keine zusätzlichen Rechte verschaffen
+    security_opt:
+      - no-new-privileges:true
+    # Alle Linux-Sonderrechte entziehen, bis auf die, die nginx zum Start
+    # braucht: Port 80 öffnen und danach zum Nutzer "nginx" wechseln
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - SETUID
+      - SETGID
+      - CHOWN
     restart: unless-stopped
 
   # Container 2: Python, nur im internen Docker-Netz erreichbar
@@ -46,6 +58,11 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
       SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-120}
+    # Läuft als normaler Nutzer auf Port 8000 und braucht keine Sonderrechte
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
 volumes:
