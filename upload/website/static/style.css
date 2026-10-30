@@ -369,6 +369,15 @@ input[type="radio"] {
   justify-self: start;
 }
 
+.song-toggle {
+  justify-self: start;
+}
+
+.song-group {
+  display: grid;
+  gap: 4px;
+}
+
 .login-dialog {
   width: min(420px, calc(100vw - 32px));
   max-width: none;

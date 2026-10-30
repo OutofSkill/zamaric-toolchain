@@ -91,6 +91,7 @@ const state = {
   folderError: null,
   checkError: null,
   upload: null,
+  showAllSongs: false,
 };
 
 const inspectionCache = new Map();
@@ -1540,60 +1541,98 @@ function parseTimestamp(text) {
   return new Date(text.replace(/(\.\d{3})\d+/, "$1"));
 }
 
-function recentUploadsCard() {
-  const songs = (state.reference?.songs ?? [])
+const uploadedFormat = new Intl.DateTimeFormat("de-DE", {
+  timeZone: berlinZone,
+  day: "2-digit",
+  month: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+const approvedFormat = new Intl.DateTimeFormat("de-DE", { timeZone: berlinZone, day: "2-digit", month: "2-digit", year: "numeric" });
+
+function uploadedSongs() {
+  return (state.reference?.songs ?? [])
     .filter((song) => song.created_at)
     .map((song) => ({
       ...song,
       created_at: parseTimestamp(song.created_at),
       approved_at: song.approved_at ? parseTimestamp(song.approved_at) : null,
       release_at: song.release_at ? parseTimestamp(song.release_at) : null,
-    }))
-    .sort((left, right) => right.created_at - left.created_at)
-    .slice(0, recentUploadCount);
-  if (songs.length === 0) return null;
-  const categoryNames = new Map((state.reference.categories ?? []).map((category) => [category.id, category.name]));
-  const uploadedFormat = new Intl.DateTimeFormat("de-DE", {
-    timeZone: berlinZone,
-    day: "2-digit",
-    month: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  const approvedFormat = new Intl.DateTimeFormat("de-DE", { timeZone: berlinZone, day: "2-digit", month: "2-digit", year: "numeric" });
+    }));
+}
+
+function songTable(songs, categoryNames) {
   return h(
-    "section",
-    { class: "card" },
-    h("div", { class: "section-head" }, h("h2", {}, "Zuletzt hochgeladen")),
+    "div",
+    { class: "table-wrap" },
     h(
-      "div",
-      { class: "table-wrap" },
+      "table",
+      {},
       h(
-        "table",
+        "thead",
         {},
-        h("thead", {}, h("tr", {}, h("th", {}, "Song"), h("th", {}, "Kategorie"), h("th", {}, "Hochgeladen"), h("th", {}, "Freigabe"))),
-        h(
-          "tbody",
-          {},
-          songs.map((song) =>
+        h("tr", {}, h("th", {}, "Song"), categoryNames ? h("th", {}, "Kategorie") : null, h("th", {}, "Hochgeladen"), h("th", {}, "Freigabe")),
+      ),
+      h(
+        "tbody",
+        {},
+        songs.map((song) =>
+          h(
+            "tr",
+            {},
+            h("td", {}, song.name),
+            categoryNames ? h("td", {}, categoryNames.get(song.category_id) ?? "–") : null,
+            h("td", {}, `${uploadedFormat.format(song.created_at)} Uhr`),
             h(
-              "tr",
-              {},
-              h("td", {}, song.name),
-              h("td", {}, categoryNames.get(song.category_id) ?? "–"),
-              h("td", {}, `${uploadedFormat.format(song.created_at)} Uhr`),
-              h(
-                "td",
-                { class: song.approved_at ? "" : "muted" },
-                song.approved_at
-                  ? `freigegeben am ${approvedFormat.format(song.approved_at)}`
-                  : `wartet, frühestens ${formatReleaseDay(expectedReleaseDay(song))}`,
-              ),
+              "td",
+              { class: song.approved_at ? "" : "muted" },
+              song.approved_at
+                ? `freigegeben am ${approvedFormat.format(song.approved_at)}`
+                : `wartet, frühestens ${formatReleaseDay(expectedReleaseDay(song))}`,
             ),
           ),
         ),
       ),
     ),
+  );
+}
+
+function recentUploadsCard() {
+  const songs = uploadedSongs();
+  if (songs.length === 0) return null;
+  const categories = state.reference.categories ?? [];
+  const categoryNames = new Map(categories.map((category) => [category.id, category.name]));
+  const recent = [...songs].sort((left, right) => right.created_at - left.created_at).slice(0, recentUploadCount);
+  const toggle = () => {
+    state.showAllSongs = !state.showAllSongs;
+    render();
+  };
+  return h(
+    "section",
+    { class: "card" },
+    h("div", { class: "section-head" }, h("h2", {}, "Zuletzt hochgeladen")),
+    songTable(recent, categoryNames),
+    songs.length > recentUploadCount || state.showAllSongs
+      ? h(
+          "button",
+          { class: "button small song-toggle", type: "button", "aria-expanded": String(state.showAllSongs), onclick: toggle },
+          state.showAllSongs ? "Alle Songs ausblenden" : `Alle Songs anzeigen (${songs.length})`,
+        )
+      : null,
+    state.showAllSongs
+      ? categories.map((category) => {
+          const inCategory = songs
+            .filter((song) => song.category_id === category.id)
+            .sort((left, right) => left.name.localeCompare(right.name, "de"));
+          if (inCategory.length === 0) return null;
+          return h(
+            "div",
+            { class: "song-group" },
+            h("h3", {}, category.name, h("span", { class: "count" }, String(inCategory.length))),
+            songTable(inCategory, null),
+          );
+        })
+      : null,
   );
 }
 
