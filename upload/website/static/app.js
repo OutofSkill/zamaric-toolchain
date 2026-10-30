@@ -94,7 +94,10 @@ const state = {
 };
 
 const inspectionCache = new Map();
+const sessionCheckIntervalMs = 60 * 1000;
 let sharedAudioContext = null;
+let signedIn = false;
+let referenceRefreshRunning = false;
 
 class SessionExpired extends Error {}
 
@@ -380,6 +383,26 @@ async function request(path, options = {}) {
   return response;
 }
 
+async function checkSession() {
+  if (demo || !signedIn) return;
+  await request("/api/session").catch(() => null);
+}
+
+async function refreshReference() {
+  if (demo || !signedIn || referenceRefreshRunning || state.checking || state.upload?.status === "running") return;
+  referenceRefreshRunning = true;
+  const reference = await loadReference().catch(() => null);
+  referenceRefreshRunning = false;
+  if (!reference || !signedIn || state.checking) return;
+  if (JSON.stringify(reference) === JSON.stringify(state.reference)) return;
+  state.reference = reference;
+  if (state.result) {
+    await runCheck();
+  } else {
+    render();
+  }
+}
+
 async function readError(response) {
   try {
     const body = await response.json();
@@ -585,6 +608,7 @@ function goTo(step) {
   state.step = step;
   render();
   window.scrollTo({ top: 0 });
+  refreshReference();
 }
 
 function stepAvailable(index) {
@@ -943,6 +967,7 @@ function renderLogin(notice = null) {
     errorBox,
     submit,
   );
+  signedIn = false;
   root.replaceChildren(h("div", { class: "shell narrow" }, form));
   passwordInput.focus();
 }
@@ -2562,6 +2587,7 @@ function render() {
 async function start() {
   try {
     state.reference = await loadReference();
+    signedIn = true;
     render();
   } catch (error) {
     if (error instanceof SessionExpired) return;
@@ -2584,5 +2610,13 @@ async function start() {
 
 window.addEventListener("resize", layoutTimelines);
 document.fonts?.ready.then(layoutTimelines);
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState !== "visible") return;
+  await checkSession();
+  refreshReference();
+});
+setInterval(() => {
+  if (document.visibilityState === "visible") checkSession();
+}, sessionCheckIntervalMs);
 
 start();

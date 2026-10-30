@@ -17,7 +17,7 @@ import sessions
 from config import settings
 from errors import ApiError
 from reference import load_reference
-from sessions import COOKIE_NAME, Session, current_session, fresh_client
+from sessions import COOKIE_NAME, Session, current_session, existing_session, fresh_client
 from upload import upload_song
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
@@ -98,6 +98,13 @@ async def post_login(body: LoginRequest, response: Response) -> None:
 async def post_logout(response: Response, session: Session = Depends(current_session)) -> None:
     await sessions.logout(session)
     response.delete_cookie(COOKIE_NAME, path="/", secure=settings.secure_cookie, httponly=True, samesite="strict")
+
+
+# Nur "noch angemeldet?" für die Website: 204 oder 401. Verlängert die Session
+# nicht und fragt Supabase nicht.
+@app.get("/api/session", status_code=204, dependencies=[Depends(existing_session)])
+async def get_session_status() -> None:
+    return None
 
 
 @app.get("/api/reference")

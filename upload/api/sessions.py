@@ -119,7 +119,21 @@ async def logout(session: Session) -> None:
 
 
 def current_session(request: Request) -> Session:
-    """FastAPI-Abhängigkeit: die Session zum Cookie, sonst 401."""
+    """FastAPI-Abhängigkeit: die Session zum Cookie, sonst 401.
+
+    Zählt als Aktivität und verlängert die Session.
+    """
+    session = existing_session(request)
+    session.last_used = time.monotonic()
+    return session
+
+
+def existing_session(request: Request) -> Session:
+    """FastAPI-Abhängigkeit: die Session zum Cookie, sonst 401.
+
+    Verlängert die Session nicht. Für die regelmäßige Prüfung der Website,
+    damit ein offener Tab die Session nicht ewig am Leben hält.
+    """
     session_id = request.cookies.get(COOKIE_NAME)
     session = sessions.get(session_id) if session_id else None
     if session is None:
@@ -127,7 +141,6 @@ def current_session(request: Request) -> Session:
     if session.is_idle():
         sessions.pop(session.session_id, None)
         raise ApiError(401, "unauthorized", "Session abgelaufen")
-    session.last_used = time.monotonic()
     return session
 
 

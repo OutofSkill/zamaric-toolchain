@@ -8,6 +8,8 @@ const defaultLevelName = "normal";
 const defaultType = "Normal";
 const jumpMarks = new Set(["D.S.", "D.C."]);
 const variantModifierPattern = /^(ohne Drums|lauter)?(_?langsamer)?$/i;
+const withoutDrumsPattern = /ohne drums/i;
+const drumInstrumentPrefix = "drum";
 const invisibleCharacters = /[\p{Cf}\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/gu;
 
 function hasInvisible(text) {
@@ -583,7 +585,13 @@ export async function checkSong({
   };
   const typeInstrumentIds = (type) => {
     const segmentKeys = new Set(type.split(" - ").map(fold));
-    return instruments.filter((instrument) => segmentKeys.has(fold(instrument.name))).map((instrument) => instrument.id);
+    const withoutDrums = withoutDrumsPattern.test(type);
+    return instruments
+      .filter(
+        (instrument) =>
+          segmentKeys.has(fold(instrument.name)) || (withoutDrums && fold(instrument.name).startsWith(drumInstrumentPrefix)),
+      )
+      .map((instrument) => instrument.id);
   };
   const checkTypeInstrument = (entry, type) => {
     if (fold(type) === fold(defaultType)) return;
