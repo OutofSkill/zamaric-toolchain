@@ -373,6 +373,31 @@ input[type="radio"] {
   justify-self: start;
 }
 
+.song-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.song-filters input[type="search"] {
+  flex: 1 1 220px;
+}
+
+.song-filters input[type="search"],
+.song-filters select {
+  padding: 8px 14px;
+  border: 1px solid var(--outline);
+  border-radius: var(--radius-control);
+  background: var(--surface-highest);
+  color: var(--text);
+  font: inherit;
+}
+
+.song-groups {
+  display: grid;
+  gap: 16px;
+}
+
 .song-group {
   display: grid;
   gap: 4px;

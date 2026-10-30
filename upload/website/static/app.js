@@ -92,6 +92,8 @@ const state = {
   checkError: null,
   upload: null,
   showAllSongs: false,
+  songSearch: "",
+  songCategoryFilter: null,
 };
 
 const inspectionCache = new Map();
@@ -1619,21 +1621,63 @@ function recentUploadsCard() {
           state.showAllSongs ? "Alle Songs ausblenden" : `Alle Songs anzeigen (${songs.length})`,
         )
       : null,
-    state.showAllSongs
-      ? categories.map((category) => {
-          const inCategory = songs
-            .filter((song) => song.category_id === category.id)
-            .sort((left, right) => left.name.localeCompare(right.name, "de"));
-          if (inCategory.length === 0) return null;
-          return h(
-            "div",
-            { class: "song-group" },
-            h("h3", {}, category.name, h("span", { class: "count" }, String(inCategory.length))),
-            songTable(inCategory, null),
-          );
-        })
-      : null,
+    state.showAllSongs ? allSongsSection(songs, categories) : null,
   );
+}
+
+function searchKey(text) {
+  return text.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
+}
+
+function allSongsSection(songs, categories) {
+  const list = h("div", { class: "song-groups" });
+  const fillList = () => list.replaceChildren(...songGroups(songs, categories));
+  const search = h("input", {
+    type: "search",
+    placeholder: "Song suchen",
+    "aria-label": "Song suchen",
+    value: state.songSearch,
+    oninput: (event) => {
+      state.songSearch = event.target.value;
+      fillList();
+    },
+  });
+  const categorySelect = h(
+    "select",
+    {
+      "aria-label": "Kategorie",
+      onchange: (event) => {
+        state.songCategoryFilter = event.target.value === "" ? null : Number(event.target.value);
+        fillList();
+      },
+    },
+    h("option", { value: "" }, "Alle Kategorien"),
+    categories.map((category) =>
+      h("option", { value: String(category.id), selected: category.id === state.songCategoryFilter }, category.name),
+    ),
+  );
+  fillList();
+  return [h("div", { class: "song-filters" }, search, categorySelect), list];
+}
+
+function songGroups(songs, categories) {
+  const query = searchKey(state.songSearch.trim());
+  const groups = categories
+    .filter((category) => state.songCategoryFilter == null || category.id === state.songCategoryFilter)
+    .map((category) => {
+      const matching = songs
+        .filter((song) => song.category_id === category.id && searchKey(song.name).includes(query))
+        .sort((left, right) => left.name.localeCompare(right.name, "de"));
+      if (matching.length === 0) return null;
+      return h(
+        "div",
+        { class: "song-group" },
+        h("h3", {}, category.name, h("span", { class: "count" }, String(matching.length))),
+        songTable(matching, null),
+      );
+    })
+    .filter(Boolean);
+  return groups.length > 0 ? groups : [h("p", { class: "muted" }, "Keine Songs gefunden")];
 }
 
 function folderSummary() {
