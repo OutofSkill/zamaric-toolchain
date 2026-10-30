@@ -18,8 +18,9 @@ async def load_reference(client: AsyncClient) -> dict:
             "instruments": await select_all(client, "instrument", "id, name, transposition", ["id"]),
             "parts": await select_all(client, "part", "id, name, transposition", ["id"]),
             "instrument_parts": await select_all(client, "instrument_part", "part_id, instrument_id", ["part_id", "instrument_id"]),
-            # Admins sehen hier alle Songs, wartende und freigegebene
-            "songs": await select_all(client, "song", "category_id, name", ["id"]),
+            # Admins sehen hier alle Songs, wartende und freigegebene. Die
+            # Zeitpunkte braucht die Website für "Zuletzt hochgeladen".
+            "songs": await select_all(client, "song", "category_id, name, created_at, approved_at, release_at", ["id"]),
         }
     except (PostgrestAPIError, httpx.HTTPError) as error:
         raise ApiError(502, "database_failed", str(error)) from None

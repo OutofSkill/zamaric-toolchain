@@ -78,5 +78,13 @@ export const demoReference = {
   instruments,
   parts: parts.map(({ id, name, transposition }) => ({ id, name, transposition })),
   instrument_parts: instrumentParts,
-  songs: [{ category_id: 1, name: "Tequila" }],
+  songs: [
+    {
+      category_id: 1,
+      name: "Tequila",
+      created_at: "2026-10-20T19:12:00.000000+00:00",
+      approved_at: "2026-10-22T02:00:00.000000+00:00",
+      release_at: null,
+    },
+  ],
 };

@@ -761,12 +761,22 @@ function berlinTime(day, hour) {
   return new Date(guess - (shown - guess));
 }
 
-function earliestReleaseDay() {
-  const earliest = new Date(Date.now() + 24 * 60 * 60 * 1000);
+function earliestReleaseDay(uploadedAt = new Date()) {
+  return releaseDayAtOrAfter(new Date(uploadedAt.getTime() + 24 * 60 * 60 * 1000));
+}
+
+function releaseDayAtOrAfter(earliest) {
   const parts = berlinParts(earliest);
   const sameDay = dayString(parts.year, parts.month, parts.day);
   if (berlinTime(sameDay, releaseHour) >= earliest) return sameDay;
   return dayString(parts.year, parts.month, parts.day + 1);
+}
+
+function expectedReleaseDay(song) {
+  const afterWaiting = earliestReleaseDay(new Date(song.created_at));
+  if (!song.release_at) return afterWaiting;
+  const planned = releaseDayAtOrAfter(new Date(song.release_at));
+  return planned > afterWaiting ? planned : afterWaiting;
 }
 
 function formatReleaseDay(day) {
@@ -938,7 +948,7 @@ function renderLogin(notice = null) {
     loginDialog.querySelector(".form-error").textContent = notice ?? "";
     return;
   }
-  if (!state.reference) root.replaceChildren(header(), h("main", { class: "shell" }));
+  if (!state.reference) render();
   const passwordInput = h("input", {
     id: "password",
     type: "password",
@@ -1520,7 +1530,71 @@ function renderFolderStep() {
     input,
     state.folderError ? h("p", { class: "form-error", role: "alert" }, state.folderError) : null,
     pageNavigation({ next: nextButton() }),
+    recentUploadsCard(),
   ];
+}
+
+const recentUploadCount = 5;
+
+function parseTimestamp(text) {
+  return new Date(text.replace(/(\.\d{3})\d+/, "$1"));
+}
+
+function recentUploadsCard() {
+  const songs = (state.reference?.songs ?? [])
+    .filter((song) => song.created_at)
+    .map((song) => ({
+      ...song,
+      created_at: parseTimestamp(song.created_at),
+      approved_at: song.approved_at ? parseTimestamp(song.approved_at) : null,
+      release_at: song.release_at ? parseTimestamp(song.release_at) : null,
+    }))
+    .sort((left, right) => right.created_at - left.created_at)
+    .slice(0, recentUploadCount);
+  if (songs.length === 0) return null;
+  const categoryNames = new Map((state.reference.categories ?? []).map((category) => [category.id, category.name]));
+  const uploadedFormat = new Intl.DateTimeFormat("de-DE", {
+    timeZone: berlinZone,
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const approvedFormat = new Intl.DateTimeFormat("de-DE", { timeZone: berlinZone, day: "2-digit", month: "2-digit", year: "numeric" });
+  return h(
+    "section",
+    { class: "card" },
+    h("div", { class: "section-head" }, h("h2", {}, "Zuletzt hochgeladen")),
+    h(
+      "div",
+      { class: "table-wrap" },
+      h(
+        "table",
+        {},
+        h("thead", {}, h("tr", {}, h("th", {}, "Song"), h("th", {}, "Kategorie"), h("th", {}, "Hochgeladen"), h("th", {}, "Freigabe"))),
+        h(
+          "tbody",
+          {},
+          songs.map((song) =>
+            h(
+              "tr",
+              {},
+              h("td", {}, song.name),
+              h("td", {}, categoryNames.get(song.category_id) ?? "–"),
+              h("td", {}, `${uploadedFormat.format(song.created_at)} Uhr`),
+              h(
+                "td",
+                { class: song.approved_at ? "" : "muted" },
+                song.approved_at
+                  ? `freigegeben am ${approvedFormat.format(song.approved_at)}`
+                  : `wartet, frühestens ${formatReleaseDay(expectedReleaseDay(song))}`,
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 function folderSummary() {
