@@ -388,12 +388,17 @@ async function checkSession() {
   await request("/api/session").catch(() => null);
 }
 
+function referenceRefreshAllowed() {
+  const status = state.upload?.status;
+  return !demo && signedIn && !state.checking && status !== "running" && status !== "done";
+}
+
 async function refreshReference() {
-  if (demo || !signedIn || referenceRefreshRunning || state.checking || state.upload?.status === "running") return;
+  if (!referenceRefreshAllowed() || referenceRefreshRunning) return;
   referenceRefreshRunning = true;
   const reference = await loadReference().catch(() => null);
   referenceRefreshRunning = false;
-  if (!reference || !signedIn || state.checking) return;
+  if (!reference || !referenceRefreshAllowed()) return;
   if (JSON.stringify(reference) === JSON.stringify(state.reference)) return;
   state.reference = reference;
   if (state.result) {
