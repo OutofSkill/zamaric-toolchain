@@ -97,6 +97,7 @@ const inspectionCache = new Map();
 const sessionCheckIntervalMs = 60 * 1000;
 let sharedAudioContext = null;
 let signedIn = false;
+let loginDialog = null;
 let referenceRefreshRunning = false;
 
 class SessionExpired extends Error {}
@@ -846,6 +847,8 @@ function startUpload() {
       state.upload = { status: "done", releaseDay: releaseDay() };
       clearDraft();
     } else if (xhr.status === 401) {
+      state.upload = { status: "failed", text: "Nicht hochgeladen, weil die Anmeldung abgelaufen war. Bitte erneut hochladen." };
+      render();
       renderLogin("Anmeldung abgelaufen. Bitte neu anmelden.");
       return;
     } else {
@@ -930,10 +933,17 @@ function header(withSteps = false) {
 }
 
 function renderLogin(notice = null) {
+  signedIn = false;
+  if (loginDialog?.open) {
+    loginDialog.querySelector(".form-error").textContent = notice ?? "";
+    return;
+  }
+  if (!state.reference) root.replaceChildren(header(), h("main", { class: "shell" }));
   const passwordInput = h("input", {
     id: "password",
     type: "password",
     autocomplete: "current-password",
+    autofocus: true,
     required: true,
   });
   const errorBox = h("p", { class: "form-error", role: "alert" }, notice ?? "");
@@ -953,6 +963,9 @@ function renderLogin(notice = null) {
             body: JSON.stringify({ password: passwordInput.value }),
           });
           if (response.ok) {
+            dialog.close();
+            dialog.remove();
+            loginDialog = null;
             await start();
             return;
           }
@@ -966,14 +979,20 @@ function renderLogin(notice = null) {
       },
     },
     h("p", { class: "brand-name muted" }, "Zamaric Upload"),
-    h("h1", {}, "Anmelden"),
+    h("h1", { id: "login-title" }, "Anmelden"),
     h("label", { for: "password" }, "Passwort"),
     passwordInput,
     errorBox,
     submit,
   );
-  signedIn = false;
-  root.replaceChildren(h("div", { class: "shell narrow" }, form));
+  const dialog = h(
+    "dialog",
+    { class: "login-dialog", "aria-labelledby": "login-title", oncancel: (event) => event.preventDefault() },
+    form,
+  );
+  loginDialog = dialog;
+  document.body.append(dialog);
+  dialog.showModal();
   passwordInput.focus();
 }
 
@@ -2593,7 +2612,11 @@ async function start() {
   try {
     state.reference = await loadReference();
     signedIn = true;
-    render();
+    if (state.result && state.upload == null) {
+      await runCheck();
+    } else {
+      render();
+    }
   } catch (error) {
     if (error instanceof SessionExpired) return;
     root.replaceChildren(
