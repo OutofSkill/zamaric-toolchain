@@ -10,6 +10,8 @@ const jumpMarks = new Set(["D.S.", "D.C."]);
 const variantModifierPattern = /^(ohne Drums|lauter)?(_?langsamer)?$/i;
 const withoutDrumsPattern = /ohne drums/i;
 const drumInstrumentPrefix = "drum";
+const minimumFamilySuffixLength = 5;
+const preferredFamilyPrefix = "alt";
 const invisibleCharacters = /[\p{Cf}\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/gu;
 
 function hasInvisible(text) {
@@ -137,6 +139,33 @@ function similarity(first, second) {
   const b = second.toLowerCase();
   const longest = Math.max(a.length, b.length);
   return longest === 0 ? 1 : 1 - levenshtein(a, b) / longest;
+}
+
+function commonSuffix(first, second) {
+  let length = 0;
+  while (length < first.length && length < second.length && first.at(-1 - length) === second.at(-1 - length)) length++;
+  return first.slice(first.length - length);
+}
+
+function instrumentFamilies(names) {
+  const nameKeys = new Set(names.map(fold));
+  const suffixes = new Set();
+  for (const first of names) {
+    for (const second of names) {
+      if (fold(first) === fold(second)) continue;
+      const suffix = commonSuffix(fold(first), fold(second));
+      if (suffix.length >= minimumFamilySuffixLength && !nameKeys.has(suffix)) suffixes.add(suffix);
+    }
+  }
+  return [...suffixes].map((suffix) => {
+    const members = names.filter((name) => fold(name).endsWith(suffix)).sort((left, right) => left.localeCompare(right, "de"));
+    const spelled = members[0].slice(members[0].length - suffix.length);
+    return {
+      name: spelled.charAt(0).toUpperCase() + spelled.slice(1),
+      members,
+      preferred: members.find((name) => fold(name) === preferredFamilyPrefix + suffix) ?? null,
+    };
+  });
 }
 
 function bestMatch(value, candidates, cutoff) {
@@ -593,19 +622,45 @@ export async function checkSong({
       )
       .map((instrument) => instrument.id);
   };
+  const families = instrumentFamilies(instrumentNames);
+  const familyFor = (segment) => {
+    const exact = families.find((family) => fold(family.name) === fold(segment));
+    if (exact) return exact;
+    const similar = bestMatch(
+      segment,
+      families.map((family) => family.name),
+      typeInstrumentCutoff,
+    );
+    return families.find((family) => family.name === similar) ?? null;
+  };
   const checkTypeInstrument = (entry, type) => {
     if (fold(type) === fold(defaultType)) return;
     const segments = type.split(" - ");
+    const { directory, extension } = splitPath(entry.path);
+    const renamedTo = (index, replacement) =>
+      joinPath(
+        directory,
+        `${songName} - ${segments.map((other, otherIndex) => (otherIndex === index ? replacement : other)).join(" - ")}`,
+        extension,
+      );
     segments.forEach((segment, index) => {
       if (isModifier(segment) || instrumentNameKeys.has(fold(segment))) return;
       const similar = bestMatch(segment, instrumentNames, typeInstrumentCutoff);
-      if (!similar) return;
-      const corrected = segments.map((other, otherIndex) => (otherIndex === index ? similar : other)).join(" - ");
-      const { directory, extension } = splitPath(entry.path);
-      warning("unknown_type_instrument", entry.original, `Tippfehler im Zusatz: „${segment}“`, {
-        suggestion: joinPath(directory, `${songName} - ${corrected}`, extension),
-        suggestionLabel: similar,
-      });
+      if (similar) {
+        warning("unknown_type_instrument", entry.original, `Tippfehler im Zusatz: „${segment}“`, {
+          suggestion: renamedTo(index, similar),
+          suggestionLabel: similar,
+        });
+        return;
+      }
+      const family = familyFor(segment);
+      if (!family) return;
+      error(
+        "ambiguous_type_instrument",
+        entry.original,
+        `„${segment}“ ist kein genaues Instrument, gemeint ist eines von: ${family.members.join(", ")}`,
+        family.preferred ? { suggestion: renamedTo(index, family.preferred), suggestionLabel: family.preferred } : {},
+      );
     });
   };
   for (const playback of playbacksByType.values()) checkTypeInstrument(playback.entry, playback.type);

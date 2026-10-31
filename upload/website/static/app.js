@@ -58,6 +58,7 @@ const groupTitles = {
   unknown_count_in: "Einzähler fehlt",
   unused_count_in: "Einzähler wird nicht benutzt",
   unknown_type_instrument: "Tippfehler im Zusatz",
+  ambiguous_type_instrument: "Instrument im Zusatz ungenau",
   letter_time_differs_between_variants: "Buchstabe zeitlich verschoben",
   letters_differ_between_variants: "Buchstaben anders als im Vergleichs-Playback",
   first_letter_not_at_start: "Erster Buchstabe nicht bei 0:00",
