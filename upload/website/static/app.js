@@ -85,7 +85,6 @@ const state = {
   release: { mode: "earliest", date: "", month: "" },
   publisher: { name: "", url: "" },
   excluded: new Set(),
-  withCountIn: true,
   openPickers: new Set(),
   listFilter: new Map(),
   settings: new Map(),
@@ -654,6 +653,7 @@ function selectFolder(selection, advance = true) {
   state.upload = null;
   inspectionCache.clear();
   stopPlayer();
+  decodedAudio.clear();
   if (advance) goTo(1);
 }
 
@@ -957,6 +957,8 @@ function resetSong() {
   state.folderError = null;
   state.checkError = null;
   inspectionCache.clear();
+  stopPlayer();
+  decodedAudio.clear();
   goTo(0);
 }
 
@@ -1875,7 +1877,7 @@ function publisherCard() {
   return h(
     "section",
     { class: "card" },
-    h("div", {}, h("h2", {}, "Verlagsnoten"), h("p", { class: "muted small" }, "Freiwillig. In der App erscheint dann ein Knopf mit dem Link zum Verlag.")),
+    h("h2", {}, "Verlagsnoten", h("span", { class: "count" }, "Optional")),
     h(
       "div",
       { class: "publisher-fields" },
@@ -1960,98 +1962,206 @@ function renderSheetMusicStep() {
   ];
 }
 
-const player ={ audio: new Audio(), countInAudio: new Audio(), path: null, countIn: null, urls: new Map() };
+const decodedPlaybackLimit = 3;
+const startDelaySeconds = 0.05;
 
-function audioUrl(path) {
+const player = {
+  path: null,
+  position: 0,
+  countIn: null,
+  playing: false,
+  loading: false,
+  startedAt: 0,
+  countInStartedAt: 0,
+  sources: [],
+  request: 0,
+  frame: null,
+};
+
+const decodedAudio = new Map();
+
+function isCountInPath(path) {
+  return path.split("/")[1] === "Einzaehler";
+}
+
+function decodeAudio(path) {
   const entry = state.files.find((candidate) => candidate.path === path);
-  if (!entry) return null;
-  const known = player.urls.get(path);
-  if (known && known.file === entry.file) return known.url;
-  if (known) URL.revokeObjectURL(known.url);
-  const url = URL.createObjectURL(entry.file);
-  player.urls.set(path, { file: entry.file, url });
-  return url;
+  if (!entry) return Promise.reject(new Error("missing file"));
+  const known = decodedAudio.get(path);
+  if (known && known.file === entry.file) {
+    decodedAudio.delete(path);
+    decodedAudio.set(path, known);
+    return known.promise;
+  }
+  const promise = entry.file.arrayBuffer().then((buffer) => audioContext().decodeAudioData(buffer));
+  const decoded = { file: entry.file, promise };
+  decodedAudio.set(path, decoded);
+  promise.catch(() => {
+    if (decodedAudio.get(path) === decoded) decodedAudio.delete(path);
+  });
+  const playbackPaths = [...decodedAudio.keys()].filter((candidate) => !isCountInPath(candidate));
+  for (const oldPath of playbackPaths.slice(0, Math.max(0, playbackPaths.length - decodedPlaybackLimit))) {
+    decodedAudio.delete(oldPath);
+  }
+  return promise;
 }
 
-function loadPlayer(path) {
-  if (player.path === path) return true;
-  const url = audioUrl(path);
-  if (!url) return false;
-  player.audio.src = url;
+function stopSources() {
+  for (const source of player.sources) {
+    source.onended = null;
+    try {
+      source.stop();
+    } catch {}
+    source.disconnect();
+  }
+  player.sources = [];
+}
+
+function startSource(buffer, when, offsetSeconds, onEnded) {
+  const context = audioContext();
+  const source = context.createBufferSource();
+  source.buffer = buffer;
+  source.connect(context.destination);
+  source.onended = onEnded;
+  source.start(when, Math.min(offsetSeconds, buffer.duration));
+  player.sources.push(source);
+}
+
+function currentPosition() {
+  if (!player.playing) return player.position;
+  return player.position + Math.max(0, audioContext().currentTime - player.startedAt) * 1000;
+}
+
+function countInRunning() {
+  return player.countIn != null && (!player.playing || audioContext().currentTime < player.startedAt);
+}
+
+function selectPlayback(path, position, countIn = null) {
+  player.request++;
+  stopSources();
   player.path = path;
-  return true;
+  player.position = position;
+  player.countIn = countIn;
+  player.playing = false;
+  player.loading = false;
 }
 
-function cancelCountIn() {
-  if (!player.countIn) return;
-  player.countIn = null;
-  player.countInAudio.pause();
-}
-
-function togglePlayer(path) {
-  if (player.path === path && (player.countIn || !player.audio.paused)) {
-    cancelCountIn();
-    player.audio.pause();
-    updatePlayer();
-    return;
-  }
-  cancelCountIn();
-  if (loadPlayer(path)) player.audio.play().catch(() => {});
-}
-
-function playFrom(path, milliseconds) {
-  cancelCountIn();
-  if (!loadPlayer(path)) return;
-  player.audio.currentTime = milliseconds / 1000;
-  player.audio.play().catch(() => {});
-}
-
-function playLetter(path, letter) {
-  const countIn = state.withCountIn ? state.result?.count_ins.find((candidate) => candidate.name === letter.count_in) : null;
-  const countInUrl = countIn ? audioUrl(countIn.path) : null;
-  if (!countIn || !countInUrl || letter.position_ms <= countIn.duration_ms) {
-    playFrom(path, letter.position_ms);
-    return;
-  }
-  cancelCountIn();
-  if (!loadPlayer(path)) return;
-  player.audio.pause();
-  player.audio.currentTime = letter.position_ms / 1000;
-  player.countIn = { name: countIn.name, position: letter.position_ms };
-  player.countInAudio.src = countInUrl;
-  player.countInAudio.currentTime = 0;
-  player.countInAudio.play().catch(() => {});
+function playbackEnded() {
+  selectPlayback(player.path, 0);
   updatePlayer();
 }
 
-player.countInAudio.addEventListener("ended", () => {
-  if (!player.countIn) return;
-  player.countIn = null;
-  player.audio.play().catch(() => {});
-});
+async function startPlayback() {
+  const request = ++player.request;
+  const context = audioContext();
+  stopSources();
+  player.playing = false;
+  player.loading = true;
+  updatePlayer();
+  let buffers;
+  try {
+    buffers = await Promise.all([
+      decodeAudio(player.path),
+      player.countIn ? decodeAudio(player.countIn.path) : null,
+      context.resume(),
+    ]);
+  } catch {
+    if (request === player.request) {
+      player.loading = false;
+      updatePlayer();
+    }
+    return;
+  }
+  if (request !== player.request) return;
+  const [main, countIn] = buffers;
+  const start = context.currentTime + startDelaySeconds;
+  let mainStart = start;
+  if (countIn) {
+    startSource(countIn, start, player.countIn.offset, null);
+    mainStart = start + Math.max(0, countIn.duration - player.countIn.offset);
+  }
+  startSource(main, mainStart, player.position / 1000, playbackEnded);
+  player.countInStartedAt = start;
+  player.startedAt = mainStart;
+  player.loading = false;
+  player.playing = true;
+  animatePlayer();
+}
+
+function pausePlayback() {
+  if (player.playing && countInRunning()) {
+    player.countIn.offset += Math.max(0, audioContext().currentTime - player.countInStartedAt);
+  } else if (player.playing) {
+    player.position = currentPosition();
+    player.countIn = null;
+  }
+  player.request++;
+  stopSources();
+  player.playing = false;
+  player.loading = false;
+  updatePlayer();
+}
+
+function animatePlayer() {
+  if (player.frame != null) return;
+  const step = () => {
+    player.frame = null;
+    if (!player.playing) return;
+    updatePlayer();
+    player.frame = requestAnimationFrame(step);
+  };
+  step();
+}
+
+function togglePlayer(path) {
+  if (player.path === path && (player.playing || player.loading)) {
+    pausePlayback();
+    return;
+  }
+  if (player.path !== path) selectPlayback(path, 0);
+  startPlayback();
+}
+
+function seekPlayer(path, position) {
+  const continuePlaying = player.playing || player.loading;
+  selectPlayback(path, position);
+  if (continuePlaying) startPlayback();
+  else updatePlayer();
+}
+
+function playLetter(path, letter) {
+  const countIn = state.result?.count_ins.find((candidate) => candidate.name === letter.count_in);
+  if (!countIn) {
+    selectPlayback(path, letter.position_ms);
+  } else if (letter.position_ms <= countIn.duration_ms) {
+    selectPlayback(path, 0);
+  } else {
+    selectPlayback(path, letter.position_ms, { name: countIn.name, path: countIn.path, offset: 0 });
+  }
+  startPlayback();
+}
 
 function stopPlayer() {
-  cancelCountIn();
-  player.audio.pause();
-  player.audio.removeAttribute("src");
-  player.audio.load();
-  player.path = null;
+  selectPlayback(null, 0);
   updatePlayer();
 }
 
 function updatePlayer() {
-  const position = player.countIn ? player.countIn.position : player.audio.currentTime * 1000;
+  const position = currentPosition();
+  const inCountIn = countInRunning();
   for (const element of root.querySelectorAll("[data-player]")) {
     const active = element.dataset.player === player.path;
-    const playing = active && (Boolean(player.countIn) || !player.audio.paused);
+    const playing = active && (player.playing || player.loading);
     if (element.classList.contains("play-button")) {
       element.textContent = playing ? "❚❚" : "▶";
       element.setAttribute("aria-label", playing ? "Pause" : "Abspielen");
     } else if (element.classList.contains("player-time")) {
       element.textContent =
-        active && player.countIn
-          ? `Einzähler ${player.countIn.name} …`
-          : `${formatDuration(active ? position : 0)} / ${formatDuration(Number(element.dataset.duration))}`;
+        active && player.loading
+          ? "Lädt …"
+          : active && inCountIn
+            ? `Einzähler ${player.countIn.name} …`
+            : `${formatDuration(active ? position : 0)} / ${formatDuration(Number(element.dataset.duration))}`;
     } else if (element.classList.contains("timeline")) {
       const duration = Number(element.dataset.duration);
       const playhead = element.querySelector(".timeline-playhead");
@@ -2073,33 +2183,12 @@ function updatePlayer() {
   }
 }
 
-for (const type of ["play", "pause", "ended", "timeupdate", "seeked"]) {
-  player.audio.addEventListener(type, updatePlayer);
-}
-
 function playerControls(path, duration) {
   return h(
     "div",
     { class: "player-controls" },
     h("button", { class: "play-button", type: "button", "data-player": path, "aria-label": "Abspielen", onclick: () => togglePlayer(path) }, "▶"),
     h("span", { class: "player-time", "data-player": path, "data-duration": String(duration) }, `0:00 / ${formatDuration(duration)}`),
-  );
-}
-
-function countInToggle() {
-  return h(
-    "label",
-    { class: "check small" },
-    h("input", {
-      type: "checkbox",
-      checked: state.withCountIn,
-      onchange: (event) => {
-        state.withCountIn = event.target.checked;
-        if (!state.withCountIn) cancelCountIn();
-        render();
-      },
-    }),
-    "Buchstaben mit Einzähler abspielen",
   );
 }
 
@@ -2179,7 +2268,7 @@ function timeline(playback) {
         class: "timeline-track",
         onclick: (event) => {
           const bounds = event.currentTarget.getBoundingClientRect();
-          playFrom(playback.path, Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)) * duration);
+          seekPlayer(playback.path, Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)) * duration);
         },
       },
       segments,
@@ -2371,7 +2460,6 @@ function renderPlaybacksStep() {
             "div",
             { class: "section-head" },
             h("h2", {}, "Playbacks", h("span", { class: "count" }, String(audioFiles.length))),
-            countInToggle(),
           ),
           bulkBar(audioFiles.map((entry) => entry.path)),
           h(
