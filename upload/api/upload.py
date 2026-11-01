@@ -173,6 +173,8 @@ def build_payload(manifest: Manifest, stored_names: dict[str, str], durations: d
         "category_id": manifest.category_id,
         "song_name": manifest.song_name,
         "release_at": manifest.release_at.isoformat() if manifest.release_at else None,
+        "publisher_name": manifest.publisher_name,
+        "publisher_url": manifest.publisher_url,
         "count_ins": [
             {
                 "path": stored_names[count_in.path],

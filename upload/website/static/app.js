@@ -1,4 +1,4 @@
-import { checkSong, formatPosition, groupableWarnings, instrumentLabel, isIgnoredName, warningOrder } from "./check.js";
+import { checkSong, formatPosition, groupableWarnings, hasInvisible, instrumentLabel, isIgnoredName, warningOrder } from "./check.js";
 import { demoReference } from "./demo.js";
 
 const demo = new URLSearchParams(location.search).has("demo");
@@ -83,6 +83,7 @@ const state = {
   cardIndex: new Map(),
   cardMotion: null,
   release: { mode: "earliest", date: "", month: "" },
+  publisher: { name: "", url: "" },
   excluded: new Set(),
   withCountIn: true,
   openPickers: new Set(),
@@ -535,6 +536,7 @@ function saveDraft() {
     confirmed: [...state.confirmed],
     settings: [...state.settings].map(([path, settings]) => [path, { mode: settings.mode, ids: [...settings.ids], source: settings.source }]),
     release: state.release,
+    publisher: state.publisher,
     savedAt: Date.now(),
   };
   try {
@@ -576,6 +578,7 @@ function resumeDraft(draft) {
       (draft.settings ?? []).map(([path, settings]) => [path, { mode: settings.mode, ids: new Set(settings.ids), source: settings.source }]),
     );
     state.release = draft.release ?? state.release;
+    state.publisher = { name: draft.publisher?.name ?? "", url: draft.publisher?.url ?? "" };
     runCheck().then(() => {
       if (state.result) goTo(stepAvailable(draft.step) ? draft.step : 2);
     });
@@ -643,6 +646,7 @@ function selectFolder(selection, advance = true) {
   state.confirmed = new Set();
   state.cardIndex = new Map();
   state.release = { mode: "earliest", date: "", month: "" };
+  state.publisher = { name: "", url: "" };
   state.excluded = new Set();
   state.openPickers = new Set();
   state.listFilter = new Map();
@@ -726,6 +730,9 @@ function blockingReasons() {
   if (invalidPlaybacks > 0) {
     reasons.push({ text: `Instrument wählen bei ${plural(invalidPlaybacks, "Playback", "Playbacks")}`, step: 3 });
   }
+  for (const problem of publisherProblems()) {
+    reasons.push({ text: `Verlagsnoten: ${problem}`, step: 2 });
+  }
   if (!releaseDateValid()) {
     reasons.push({ text: "Freigabe: Tag wählen", step: 4 });
   }
@@ -802,12 +809,48 @@ function releaseDateValid() {
   return state.release.mode === "earliest" || (state.release.date !== "" && state.release.date >= earliestReleaseDay());
 }
 
+const maximumPublisherNameLength = 100;
+const maximumPublisherUrlLength = 2000;
+const publisherUrlPattern = /^https:\/\/([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z][A-Za-z0-9-]*[A-Za-z0-9]([/?#][!-~]*)?$/;
+const urlSchemePattern = /^[a-z][a-z0-9+.-]*:/i;
+
+function publisherName() {
+  const text = state.publisher.name.normalize("NFC").replace(/\s+/g, " ").trim();
+  if (text === "") return { value: null };
+  if (hasInvisible(text)) return { error: "Unsichtbares Zeichen im Verlagsnamen" };
+  if (text.length > maximumPublisherNameLength) return { error: `Verlagsname länger als ${maximumPublisherNameLength} Zeichen` };
+  return { value: text };
+}
+
+function publisherUrl() {
+  const text = state.publisher.url.trim();
+  if (text === "") return { value: null };
+  let url;
+  try {
+    url = new URL(urlSchemePattern.test(text) ? text : `https://${text}`);
+  } catch {
+    return { error: "Kein gültiger Link" };
+  }
+  if (url.protocol !== "https:") return { error: "Nur Links mit https:// erlaubt" };
+  if (url.username || url.password) return { error: "Link mit „…@“ vor der Domain nicht erlaubt" };
+  if (url.port) return { error: "Link mit Port nicht erlaubt" };
+  if (url.href.length > maximumPublisherUrlLength) return { error: `Link länger als ${maximumPublisherUrlLength} Zeichen` };
+  if (!publisherUrlPattern.test(url.href)) return { error: "Link braucht eine Domain wie verlag.de" };
+  return { value: url.href, host: url.hostname };
+}
+
+function publisherProblems() {
+  return [publisherName().error, publisherUrl().error].filter(Boolean);
+}
+
 function buildManifest() {
   const result = state.result;
   return {
     category_id: state.categoryId,
     song_name: result.song_name,
     release_at: state.release.mode === "date" ? berlinTime(state.release.date, releaseHour).toISOString() : null,
+    publisher_name: publisherName().value ?? null,
+    publisher_url: publisherUrl().value ?? null,
     count_ins: result.count_ins.map(({ path, name, duration_ms }) => ({ path, name, duration_ms })),
     playbacks: result.playbacks.map((playback) => {
       const settings = state.settings.get(playback.path);
@@ -905,6 +948,7 @@ function resetSong() {
   state.confirmed = new Set();
   state.cardIndex = new Map();
   state.release = { mode: "earliest", date: "", month: "" };
+  state.publisher = { name: "", url: "" };
   state.excluded = new Set();
   state.openPickers = new Set();
   state.listFilter = new Map();
@@ -1021,7 +1065,8 @@ function stepper() {
         let note = null;
         if (state.result && (step.id === "sheetMusic" || step.id === "playbacks" || step.id === "overview")) {
           const status = areaStatus(step.id);
-          if (status.errors > 0) note = h("span", { class: "step-note error" }, plural(status.errors, "Fehler", "Fehler"));
+          const errors = status.errors + (step.id === "sheetMusic" ? publisherProblems().length : 0);
+          if (errors > 0) note = h("span", { class: "step-note error" }, plural(errors, "Fehler", "Fehler"));
           else if (status.openWarnings > 0) note = h("span", { class: "step-note warning" }, plural(status.openWarnings, "Warnung", "Warnungen"));
         }
         const position = index < state.step ? "done" : index === state.step ? "current" : "upcoming";
@@ -1069,15 +1114,19 @@ function invalidPlaybackNote() {
   return invalid > 0 ? `Instrument wählen bei ${plural(invalid, "Playback", "Playbacks")}` : null;
 }
 
+function publisherNote() {
+  return publisherProblems().length > 0 ? "Verlagsnoten fehlerhaft" : null;
+}
+
 function stepNote() {
   if (state.step === 0) return state.songName ? null : h("p", { class: "page-nav-note" }, "Ordner wählen");
   if (state.step === 1) return state.categoryId == null ? h("p", { class: "page-nav-note" }, "Kategorie wählen") : null;
   if (!state.result) return null;
-  if (state.step === 2) return statusNote(["sheetMusic"]);
+  if (state.step === 2) return statusNote(["sheetMusic"], [publisherNote()]);
   if (state.step === 3) return statusNote(["playbacks"], [invalidPlaybackNote()]);
   return statusNote(
     ["overview", "sheetMusic", "playbacks"],
-    [invalidPlaybackNote(), releaseDateValid() ? null : "Freigabe-Tag wählen"],
+    [publisherNote(), invalidPlaybackNote(), releaseDateValid() ? null : "Freigabe-Tag wählen"],
     "Bereit zum Hochladen",
   );
 }
@@ -1768,6 +1817,74 @@ function viewerList(viewers) {
   );
 }
 
+function refreshStatus() {
+  root.querySelector(".topbar")?.replaceWith(header(true));
+  root.querySelector(".page-nav")?.children[1]?.replaceWith(stepNote() ?? h("span"));
+  saveDraft();
+}
+
+function publisherLink(url, label) {
+  return h("a", { class: "button small", href: url, target: "_blank", rel: "noopener noreferrer" }, label);
+}
+
+function publisherCard() {
+  const nameError = h("p", { class: "form-error", role: "alert" });
+  const urlStatus = h("div", { class: "publisher-status" });
+  const showName = () => {
+    nameError.textContent = publisherName().error ?? "";
+  };
+  const showUrl = () => {
+    const url = publisherUrl();
+    if (url.error) {
+      urlStatus.replaceChildren(h("p", { class: "form-error", role: "alert" }, url.error));
+    } else if (url.value) {
+      urlStatus.replaceChildren(h("span", { class: "muted" }, "Führt zu: ", h("strong", {}, url.host)), publisherLink(url.value, "Link öffnen"));
+    } else {
+      urlStatus.replaceChildren();
+    }
+  };
+  const field = (id, label, input, status) => h("div", { class: "publisher-field" }, h("label", { for: id }, label), input, status);
+  const nameInput = h("input", {
+    id: "publisher-name",
+    type: "text",
+    maxlength: String(maximumPublisherNameLength),
+    autocomplete: "off",
+    value: state.publisher.name,
+    oninput: (event) => {
+      state.publisher.name = event.target.value;
+      showName();
+      refreshStatus();
+    },
+  });
+  const urlInput = h("input", {
+    id: "publisher-url",
+    type: "url",
+    placeholder: "https://…",
+    maxlength: String(maximumPublisherUrlLength),
+    autocomplete: "off",
+    spellcheck: "false",
+    value: state.publisher.url,
+    oninput: (event) => {
+      state.publisher.url = event.target.value;
+      showUrl();
+      refreshStatus();
+    },
+  });
+  showName();
+  showUrl();
+  return h(
+    "section",
+    { class: "card" },
+    h("div", {}, h("h2", {}, "Verlagsnoten"), h("p", { class: "muted small" }, "Freiwillig. In der App erscheint dann ein Knopf mit dem Link zum Verlag.")),
+    h(
+      "div",
+      { class: "publisher-fields" },
+      field("publisher-name", "Verlag", nameInput, nameError),
+      field("publisher-url", "Link zu den Noten", urlInput, urlStatus),
+    ),
+  );
+}
+
 function renderSheetMusicStep() {
   const result = state.result;
   const partsById = new Map(state.reference.parts.map((part) => [part.id, part]));
@@ -1838,11 +1955,12 @@ function renderSheetMusicStep() {
             ),
           ),
         ),
+    publisherCard(),
     pageNavigation({ next: nextButton() }),
   ];
 }
 
-const player = { audio: new Audio(), countInAudio: new Audio(), path: null, countIn: null, urls: new Map() };
+const player ={ audio: new Audio(), countInAudio: new Audio(), path: null, countIn: null, urls: new Map() };
 
 function audioUrl(path) {
   const entry = state.files.find((candidate) => candidate.path === path);
@@ -2567,7 +2685,13 @@ function uploadCard() {
       notes: result.playbacks.length === 0 && result.sheet_music.length === 0 ? ["Nichts zum Hochladen"] : [],
       renderRow: (message) => messageRow(message, { showPath: true }),
     },
-    { title: "Noten", step: 2, messages: messagesFor("sheetMusic").filter(isOpen), notes: [], renderRow: blockerRow },
+    {
+      title: "Noten",
+      step: 2,
+      messages: messagesFor("sheetMusic").filter(isOpen),
+      notes: publisherProblems().map((problem) => `Verlagsnoten: ${problem}`),
+      renderRow: blockerRow,
+    },
     {
       title: "Playbacks",
       step: 3,
@@ -2650,6 +2774,8 @@ function renderOverviewStep() {
   const sizes = new Map(state.files.map((entry) => [entry.path, entry.size]));
   const totalBytes = manifestPaths(result).reduce((sum, path) => sum + (sizes.get(path) ?? 0), 0);
   const renamed = Object.keys(state.renames).length;
+  const publisherUrlCheck = publisherUrl();
+  const publisher = { name: publisherName().value, url: publisherUrlCheck.value, host: publisherUrlCheck.host };
 
   if (upload?.status === "done") {
     return [
@@ -2708,6 +2834,17 @@ function renderOverviewStep() {
               )
             : null,
         ),
+        publisher.name || publisher.url
+          ? [
+              h("dt", {}, "Verlagsnoten"),
+              h(
+                "dd",
+                { class: "publisher-facts" },
+                publisher.name ? h("span", {}, publisher.name) : null,
+                publisher.url ? publisherLink(publisher.url, publisher.host) : null,
+              ),
+            ]
+          : null,
         renamed > 0 ? [h("dt", {}, "Korrekturen"), h("dd", {}, plural(renamed, "Dateiname", "Dateinamen"))] : null,
         state.excluded.size > 0
           ? [

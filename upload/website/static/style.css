@@ -398,6 +398,52 @@ input[type="radio"] {
   gap: 16px;
 }
 
+a.button {
+  display: inline-block;
+  text-decoration: none;
+}
+
+.publisher-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.publisher-field {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+}
+
+.publisher-field input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--outline);
+  border-radius: var(--radius-control);
+  background: var(--surface-highest);
+  color: var(--text);
+  font: inherit;
+}
+
+.publisher-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  overflow-wrap: anywhere;
+}
+
+.publisher-status:empty {
+  display: none;
+}
+
+.publisher-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
 .song-group {
   display: grid;
   gap: 4px;

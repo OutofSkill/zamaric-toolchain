@@ -16,6 +16,15 @@ MAX_NAME_LENGTH = 100
 # Gleiche Regel wie letter_name_check in der DB
 LETTER_PATTERN = re.compile(r"[A-Z]|[0-9]+|D\.S\.|D\.C\.|Coda")
 
+# Gleiche Regel wie song_publisher_url_check in der DB: nur https, eine
+# Domain (keine IP, kein Port, kein "name@" davor) und danach nur sichtbare
+# ASCII-Zeichen. So kommt kein javascript:, kein unsichtbares Zeichen und
+# keine Domain mit ähnlich aussehenden fremden Buchstaben in die App.
+MAX_URL_LENGTH = 2000
+PUBLISHER_URL_PATTERN = re.compile(
+    r"https://([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z][A-Za-z0-9-]*[A-Za-z0-9]([/?#][!-~]*)?"
+)
+
 
 def check_clean_name(value: str) -> str:
     """Gleiche Regel wie private.is_clean_name() in der DB."""
@@ -32,6 +41,17 @@ def check_clean_name(value: str) -> str:
 
 
 CleanName = Annotated[str, AfterValidator(check_clean_name)]
+
+
+def check_publisher_url(url: str) -> str:
+    if len(url) > MAX_URL_LENGTH:
+        raise ValueError(f"ist länger als {MAX_URL_LENGTH} Zeichen")
+    if not PUBLISHER_URL_PATTERN.fullmatch(url):
+        raise ValueError("ist kein erlaubter https-Link")
+    return url
+
+
+PublisherUrl = Annotated[str, AfterValidator(check_publisher_url)]
 
 
 def check_path(path: str, folder: str, extension: str) -> str:
@@ -103,6 +123,9 @@ class Manifest(StrictModel):
     song_name: CleanName
     # null = frühestmögliche Freigabe, sonst Zeitpunkt mit Zeitzone
     release_at: AwareDatetime | None
+    # Verlag und Link zu den Verlagsnoten, beide freiwillig (null = keine Angabe)
+    publisher_name: CleanName | None
+    publisher_url: PublisherUrl | None
     count_ins: list[CountIn]
     playbacks: list[Playback]
     sheet_music: list[SheetMusic]
