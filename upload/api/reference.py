@@ -19,22 +19,25 @@ async def load_reference(client: AsyncClient) -> dict:
             "parts": await select_all(client, "part", "id, name, transposition", ["id"]),
             "instrument_parts": await select_all(client, "instrument_part", "part_id, instrument_id", ["part_id", "instrument_id"]),
             # Admins sehen hier alle Songs, wartende und freigegebene. Die
-            # Zeitpunkte braucht die Website für "Zuletzt hochgeladen".
-            "songs": await select_all(client, "song", "category_id, name, created_at, approved_at, release_at", ["id"]),
+            # Zeitpunkte braucht die Website für "Zuletzt hochgeladen", die ID
+            # zum Ändern eines Songs.
+            "songs": await select_all(client, "song", "id, category_id, name, created_at, release_at", ["id"]),
         }
     except (PostgrestAPIError, httpx.HTTPError) as error:
         raise ApiError(502, "database_failed", str(error)) from None
 
 
-async def select_all(client: AsyncClient, table: str, columns: str, order_by: list[str]) -> list[dict]:
+async def select_all(client: AsyncClient, table: str, columns: str, order_by: list[str], where=None) -> list[dict]:
     """Liest alle Zeilen einer Tabelle, Seite für Seite.
 
     Die feste Sortierung sorgt dafür, dass beim Blättern keine Zeile doppelt
-    kommt oder fehlt.
+    kommt oder fehlt. where bekommt die Abfrage und hängt Filter an.
     """
     rows = []
     while True:
         query = client.table(table).select(columns)
+        if where is not None:
+            query = where(query)
         for column in order_by:
             query = query.order(column)
         page = (await query.range(len(rows), len(rows) + PAGE_SIZE - 1).execute()).data

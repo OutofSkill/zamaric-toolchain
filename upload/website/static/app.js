@@ -1,5 +1,6 @@
 import { checkSong, formatPosition, groupableWarnings, hasInvisible, instrumentLabel, isIgnoredName, warningOrder } from "./check.js";
-import { demoReference } from "./demo.js";
+import { demoExistingSong, demoReference } from "./demo.js";
+import { sha256 } from "./vendor/sha256.min.js";
 
 const demo = new URLSearchParams(location.search).has("demo");
 const root = document.getElementById("app");
@@ -84,6 +85,10 @@ const state = {
   cardMotion: null,
   release: { mode: "earliest", date: "", month: "" },
   publisher: { name: "", url: "" },
+  update: null,
+  updateLoading: false,
+  updateError: null,
+  hashes: new Map(),
   playUnderCountIn: false,
   excluded: new Set(),
   openPickers: new Set(),
@@ -175,15 +180,24 @@ function isExcluded(path) {
   return false;
 }
 
+const updateModeFolders = { sheetMusic: "Noten", playbacks: "Playbacks" };
+
+function inUpdateMode(path) {
+  const folder = ownValue(updateModeFolders, state.update?.mode);
+  return !folder || path === folder || path.startsWith(`${folder}/`);
+}
+
 function activeFiles() {
-  return state.files.filter((entry) => !isExcluded(entry.path));
+  return state.files.filter((entry) => !isExcluded(entry.path) && inUpdateMode(entry.path));
 }
 
 function checkDirectories() {
   if (!state.directories) return state.directories;
   return new Set(
     [...state.directories].filter(
-      (folder) => !state.files.some((entry) => entry.path.startsWith(`${folder}/`) && !isIgnoredName(basename(entry.path))),
+      (folder) =>
+        inUpdateMode(folder) &&
+        !state.files.some((entry) => entry.path.startsWith(`${folder}/`) && !isIgnoredName(basename(entry.path))),
     ),
   );
 }
@@ -430,6 +444,36 @@ async function loadReference() {
   return response.json();
 }
 
+async function loadExistingSong(songId) {
+  if (demo) return structuredClone(demoExistingSong);
+  const response = await request(`/api/songs/${encodeURIComponent(songId)}`);
+  if (!response.ok) throw new Error("song");
+  return response.json();
+}
+
+const hashChunkBytes = 8 * 1024 * 1024;
+
+function fileHash(entry) {
+  return cached({ ...entry, original: entry.path }, "sha256", async () => {
+    const hasher = sha256.create();
+    for (let offset = 0; offset < entry.file.size; offset += hashChunkBytes) {
+      hasher.update(await entry.file.slice(offset, offset + hashChunkBytes).arrayBuffer());
+    }
+    return hasher.hex();
+  });
+}
+
+async function hashUpdateFiles(result) {
+  const paths = [
+    ...result.sheet_music.map((entry) => entry.path),
+    ...result.playbacks.map((entry) => entry.path),
+    ...result.count_ins.map((entry) => entry.path),
+  ];
+  const entries = paths.map((path) => state.files.find((candidate) => candidate.path === path)).filter(Boolean);
+  const hashes = await Promise.all(entries.map(fileHash));
+  return new Map(entries.map((entry, index) => [entry.path, hashes[index]]));
+}
+
 function audioContext() {
   if (!sharedAudioContext) {
     const Context = window.AudioContext ?? window.webkitAudioContext;
@@ -537,6 +581,7 @@ function saveDraft() {
     settings: [...state.settings].map(([path, settings]) => [path, { mode: settings.mode, ids: [...settings.ids], source: settings.source }]),
     release: state.release,
     publisher: state.publisher,
+    update: state.update ? { mode: state.update.mode, songId: state.update.songId } : null,
     savedAt: Date.now(),
   };
   try {
@@ -579,9 +624,22 @@ function resumeDraft(draft) {
     );
     state.release = draft.release ?? state.release;
     state.publisher = { name: draft.publisher?.name ?? "", url: draft.publisher?.url ?? "" };
-    runCheck().then(() => {
-      if (state.result) goTo(stepAvailable(draft.step) ? draft.step : 2);
-    });
+    const existing = draft.update ? loadExistingSong(draft.update.songId) : Promise.resolve(null);
+    existing
+      .then((song) => {
+        if (song) state.update = { mode: draft.update.mode, songId: draft.update.songId, existing: song };
+        return runCheck();
+      })
+      .then(
+        () => {
+          if (state.result) goTo(stepAvailable(draft.step) ? draft.step : 2);
+        },
+        (error) => {
+          if (error instanceof SessionExpired) return;
+          state.updateError = "Song nicht geladen. Auf der Seite Kategorie erneut wählen.";
+          goTo(1);
+        },
+      );
   });
 }
 
@@ -616,7 +674,15 @@ function draftCard() {
   );
 }
 
+const hiddenStepsByUpdateMode = { sheetMusic: [3], playbacks: [2] };
+
+function stepHidden(index) {
+  return (ownValue(hiddenStepsByUpdateMode, state.update?.mode) ?? []).includes(index);
+}
+
 function goTo(step) {
+  const direction = step < state.step ? -1 : 1;
+  while (stepHidden(step)) step += direction;
   if (step !== 3 && player.path) stopPlayer();
   state.step = step;
   render();
@@ -647,6 +713,9 @@ function selectFolder(selection, advance = true) {
   state.cardIndex = new Map();
   state.release = { mode: "earliest", date: "", month: "" };
   state.publisher = { name: "", url: "" };
+  state.update = null;
+  state.updateError = null;
+  state.hashes = new Map();
   state.excluded = new Set();
   state.openPickers = new Set();
   state.listFilter = new Map();
@@ -676,15 +745,20 @@ async function runCheck() {
       renames: state.renames,
       reference: state.reference,
       inspect,
+      updating: state.update != null,
     });
+    state.hashes = state.update ? await hashUpdateFiles(state.result) : new Map();
     for (const playback of state.result.playbacks) {
       if (state.settings.get(playback.path)?.source === "user") continue;
+      const existing = existingPlayback(playback.type);
       const suggested = playback.suggested_instrument_ids ?? [];
       state.settings.set(
         playback.path,
-        suggested.length > 0
-          ? { mode: "only", ids: new Set(suggested), source: "type" }
-          : { mode: "all", ids: new Set(), source: "default" },
+        existing
+          ? { mode: existing.instrument_mode, ids: new Set(existing.instrument_ids), source: "existing" }
+          : suggested.length > 0
+            ? { mode: "only", ids: new Set(suggested), source: "type" }
+            : { mode: "all", ids: new Set(), source: "default" },
       );
     }
   } catch (error) {
@@ -714,6 +788,141 @@ function playbackSettingsValid(playback) {
   return settings && (settings.mode === "all" || settings.ids.size > 0);
 }
 
+function sameName(left, right) {
+  return (left ?? "").toLowerCase() === (right ?? "").toLowerCase();
+}
+
+function existingPlayback(type) {
+  return state.update?.existing.playbacks.find((playback) => sameName(playback.type, type)) ?? null;
+}
+
+function existingSheet(sheet) {
+  return state.update?.existing.sheet_music.find((entry) => entry.part_id === sheet.part_id && entry.level_id === sheet.level_id) ?? null;
+}
+
+function existingCountIn(name) {
+  return state.update?.existing.count_ins.find((countIn) => sameName(countIn.name, name)) ?? null;
+}
+
+function sameLetters(left, right) {
+  return (
+    left.length === right.length &&
+    left.every(
+      (letter, index) =>
+        letter.name === right[index].name && letter.position_ms === right[index].position_ms && sameName(letter.count_in, right[index].count_in),
+    )
+  );
+}
+
+function sameVisibility(settings, existing) {
+  if (settings.mode !== existing.instrument_mode) return false;
+  const ids = [...settings.ids].sort((left, right) => left - right);
+  const existingIds = [...existing.instrument_ids].sort((left, right) => left - right);
+  return ids.length === existingIds.length && ids.every((id, index) => id === existingIds[index]);
+}
+
+function playbackChange(playback) {
+  const existing = existingPlayback(playback.type);
+  if (!existing) return { status: "new", reasons: [], fileChanged: true };
+  const reasons = [];
+  const fileChanged = state.hashes.get(playback.path) !== existing.sha256;
+  if (fileChanged) reasons.push("MP3");
+  if (!sameLetters(playback.letters, existing.letters)) reasons.push("Buchstaben");
+  const settings = state.settings.get(playback.path);
+  if (settings && !sameVisibility(settings, existing)) reasons.push("Sichtbar für");
+  if (playback.type !== existing.type) reasons.push("Schreibweise");
+  return { status: reasons.length > 0 ? "changed" : "unchanged", reasons, fileChanged };
+}
+
+function sheetChange(sheet) {
+  const existing = existingSheet(sheet);
+  if (!existing) return { status: "new", reasons: [] };
+  return state.hashes.get(sheet.path) !== existing.sha256 ? { status: "changed", reasons: ["PDF"] } : { status: "unchanged", reasons: [] };
+}
+
+function countInChange(countIn) {
+  const existing = existingCountIn(countIn.name);
+  if (!existing) return { status: "new", reasons: [] };
+  const reasons = [];
+  if (state.hashes.get(countIn.path) !== existing.sha256) reasons.push("MP3");
+  if (countIn.name !== existing.name) reasons.push("Schreibweise");
+  return { status: reasons.length > 0 ? "changed" : "unchanged", reasons };
+}
+
+const changeLabels = { new: "neu", changed: "geändert", unchanged: "unverändert" };
+
+function changeTag(change) {
+  if (!state.update || !change) return null;
+  return h(
+    "span",
+    { class: `tag change ${change.status}`, title: change.reasons.length > 0 ? `Geändert: ${change.reasons.join(", ")}` : null },
+    changeLabels[change.status],
+    change.status === "changed" && change.reasons.length > 0 ? `: ${change.reasons.join(", ")}` : "",
+  );
+}
+
+function countChanges(items, change) {
+  const totals = { new: 0, changed: 0, unchanged: 0 };
+  for (const item of items) totals[change(item).status]++;
+  return totals;
+}
+
+function publisherChanged() {
+  const existing = state.update?.existing;
+  if (!existing) return false;
+  return (publisherName().value ?? null) !== (existing.publisher_name ?? null) || (publisherUrl().value ?? null) !== (existing.publisher_url ?? null);
+}
+
+function updateHasChanges() {
+  const result = state.result;
+  const changed = (items, change) => items.some((item) => change(item).status !== "unchanged");
+  return (
+    publisherChanged() ||
+    changed(result.sheet_music, sheetChange) ||
+    changed(result.playbacks, playbackChange) ||
+    changed(result.count_ins, countInChange)
+  );
+}
+
+function keptExisting(kind) {
+  const existing = state.update?.existing;
+  const result = state.result;
+  if (!existing || !result) return [];
+  if (kind === "sheetMusic") {
+    if (state.update.mode === "playbacks") return [];
+    return existing.sheet_music.filter((entry) => !result.sheet_music.some((sheet) => sheet.part_id === entry.part_id && sheet.level_id === entry.level_id));
+  }
+  if (state.update.mode === "sheetMusic") return [];
+  if (kind === "playbacks") return existing.playbacks.filter((entry) => !result.playbacks.some((playback) => sameName(playback.type, entry.type)));
+  return existing.count_ins.filter((entry) => !result.count_ins.some((countIn) => sameName(countIn.name, entry.name)));
+}
+
+function changeSubtitle(items, change, fileCount) {
+  const totals = countChanges(items, change);
+  const parts = [
+    totals.new > 0 ? `${totals.new} neu` : null,
+    totals.changed > 0 ? `${totals.changed} geändert` : null,
+    totals.unchanged > 0 ? `${totals.unchanged} unverändert` : null,
+  ].filter(Boolean);
+  const skipped = fileCount - items.length;
+  if (skipped > 0) parts.push(`${skipped} fehlerhaft`);
+  return parts.length > 0 ? parts.join(" · ") : "Keine Dateien";
+}
+
+function keptCard(title, names) {
+  if (names.length === 0) return null;
+  return h(
+    "section",
+    { class: "card kept" },
+    h("h2", {}, title, h("span", { class: "count" }, String(names.length))),
+    h("p", { class: "muted small" }, names.join(", ")),
+  );
+}
+
+function songWaitingForRelease() {
+  return state.update != null && parseTimestamp(state.update.existing.release_at) > new Date();
+}
+
 function blockingReasons() {
   const result = state.result;
   if (!result) return [{ text: "Noch nicht geprüft", step: 1 }];
@@ -737,7 +946,9 @@ function blockingReasons() {
   if (!releaseDateValid()) {
     reasons.push({ text: "Freigabe: Tag wählen", step: 4 });
   }
-  if (result.playbacks.length === 0 && result.sheet_music.length === 0) {
+  if (state.update) {
+    if (!updateHasChanges()) reasons.push({ text: "Keine Änderungen", step: 0 });
+  } else if (result.playbacks.length === 0 && result.sheet_music.length === 0) {
     reasons.push({ text: "Nichts zum Hochladen", step: 0 });
   }
   return reasons;
@@ -782,13 +993,6 @@ function releaseDayAtOrAfter(earliest) {
   const sameDay = dayString(parts.year, parts.month, parts.day);
   if (berlinTime(sameDay, releaseHour) >= earliest) return sameDay;
   return dayString(parts.year, parts.month, parts.day + 1);
-}
-
-function expectedReleaseDay(song) {
-  const afterWaiting = earliestReleaseDay(new Date(song.created_at));
-  if (!song.release_at) return afterWaiting;
-  const planned = releaseDayAtOrAfter(new Date(song.release_at));
-  return planned > afterWaiting ? planned : afterWaiting;
 }
 
 function formatReleaseDay(day) {
@@ -844,7 +1048,32 @@ function publisherProblems() {
   return [publisherName().error, publisherUrl().error].filter(Boolean);
 }
 
+function buildUpdateManifest() {
+  const result = state.result;
+  const changed = (change) => (item) => change(item).status !== "unchanged";
+  return {
+    song_id: state.update.songId,
+    release_at: state.release.mode === "date" && !songWaitingForRelease() ? berlinTime(state.release.date, releaseHour).toISOString() : null,
+    publisher_name: publisherName().value ?? null,
+    publisher_url: publisherUrl().value ?? null,
+    count_ins: result.count_ins.filter(changed(countInChange)).map(({ path, name, duration_ms }) => ({ path, name, duration_ms })),
+    playbacks: result.playbacks.filter(changed(playbackChange)).map((playback) => {
+      const settings = state.settings.get(playback.path);
+      return {
+        path: playbackChange(playback).fileChanged ? playback.path : null,
+        type: playback.type,
+        duration_ms: playback.duration_ms,
+        instrument_mode: settings.mode,
+        instrument_ids: settings.mode === "all" ? [] : [...settings.ids].sort((left, right) => left - right),
+        letters: playback.letters,
+      };
+    }),
+    sheet_music: result.sheet_music.filter(changed(sheetChange)).map(({ path, part_id, level_id }) => ({ path, part_id, level_id })),
+  };
+}
+
 function buildManifest() {
+  if (state.update) return buildUpdateManifest();
   const result = state.result;
   return {
     category_id: state.categoryId,
@@ -873,7 +1102,7 @@ function manifestPaths(manifest) {
     ...manifest.count_ins.map((entry) => entry.path),
     ...manifest.playbacks.map((entry) => entry.path),
     ...manifest.sheet_music.map((entry) => entry.path),
-  ];
+  ].filter(Boolean);
 }
 
 function startUpload() {
@@ -893,8 +1122,9 @@ function startUpload() {
   state.upload = { status: "running", progress: 0 };
   render();
 
+  const updating = state.update != null;
   const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/upload");
+  xhr.open("POST", updating ? "/api/update" : "/api/upload");
   xhr.upload.addEventListener("progress", (event) => {
     if (!event.lengthComputable) return;
     state.upload.progress = event.loaded / event.total;
@@ -902,7 +1132,13 @@ function startUpload() {
   });
   xhr.addEventListener("load", () => {
     if (xhr.status === 201) {
-      state.upload = { status: "done", releaseDay: releaseDay() };
+      let releaseAt = null;
+      try {
+        releaseAt = updating ? parseTimestamp(JSON.parse(xhr.responseText).release_at) : null;
+      } catch {
+        releaseAt = null;
+      }
+      state.upload = { status: "done", releaseDay: releaseDay(), releaseAt, updating, rowsChanged: manifestHasRowChanges(manifest) };
       clearDraft();
     } else if (xhr.status === 401) {
       state.upload = { status: "failed", text: "Nicht hochgeladen, weil die Anmeldung abgelaufen war. Bitte erneut hochladen." };
@@ -930,6 +1166,10 @@ function startUpload() {
   xhr.send(form);
 }
 
+function manifestHasRowChanges(manifest) {
+  return manifest.count_ins.length + manifest.playbacks.length + manifest.sheet_music.length > 0;
+}
+
 function updateProgress() {
   const bar = document.querySelector(".progress-bar");
   const label = document.querySelector(".progress-label");
@@ -950,6 +1190,9 @@ function resetSong() {
   state.cardIndex = new Map();
   state.release = { mode: "earliest", date: "", month: "" };
   state.publisher = { name: "", url: "" };
+  state.update = null;
+  state.updateError = null;
+  state.hashes = new Map();
   state.excluded = new Set();
   state.openPickers = new Set();
   state.listFilter = new Map();
@@ -1065,6 +1308,8 @@ function stepper() {
       "ol",
       {},
       steps.map((step, index) => {
+        if (stepHidden(index)) return null;
+        const number = steps.slice(0, index + 1).filter((_, earlier) => !stepHidden(earlier)).length;
         let note = null;
         if (state.result && (step.id === "sheetMusic" || step.id === "playbacks" || step.id === "overview")) {
           const status = areaStatus(step.id);
@@ -1085,7 +1330,7 @@ function stepper() {
               "aria-current": index === state.step ? "step" : null,
               onclick: () => goTo(index),
             },
-            h("span", { class: "step-dot", "aria-hidden": "true" }, position === "done" ? "✓" : String(index + 1)),
+            h("span", { class: "step-dot", "aria-hidden": "true" }, position === "done" ? "✓" : String(number)),
             h("span", { class: "step-title" }, step.title),
             note,
           ),
@@ -1123,7 +1368,10 @@ function publisherNote() {
 
 function stepNote() {
   if (state.step === 0) return state.songName ? null : h("p", { class: "page-nav-note" }, "Ordner wählen");
-  if (state.step === 1) return state.categoryId == null ? h("p", { class: "page-nav-note" }, "Kategorie wählen") : null;
+  if (state.step === 1) {
+    if (state.categoryId == null) return h("p", { class: "page-nav-note" }, "Kategorie wählen");
+    return existingSongInCategory() && !state.update ? h("p", { class: "page-nav-note" }, "Wählen, was aktualisiert wird") : null;
+  }
   if (!state.result) return null;
   if (state.step === 2) return statusNote(["sheetMusic"], [publisherNote()]);
   if (state.step === 3) return statusNote(["playbacks"], [invalidPlaybackNote()]);
@@ -1605,14 +1853,28 @@ const uploadedFormat = new Intl.DateTimeFormat("de-DE", {
 });
 const approvedFormat = new Intl.DateTimeFormat("de-DE", { timeZone: berlinZone, day: "2-digit", month: "2-digit", year: "numeric" });
 
+function formatReleaseMoment(moment) {
+  const parts = berlinParts(moment);
+  if (parts.hour === releaseHour && parts.minute === 0) return formatReleaseDay(dayString(parts.year, parts.month, parts.day));
+  const text = new Intl.DateTimeFormat("de-DE", {
+    timeZone: berlinZone,
+    weekday: "short",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(moment);
+  return `${text} Uhr`;
+}
+
 function uploadedSongs() {
   return (state.reference?.songs ?? [])
-    .filter((song) => song.created_at)
+    .filter((song) => song.created_at && song.release_at)
     .map((song) => ({
       ...song,
       created_at: parseTimestamp(song.created_at),
-      approved_at: song.approved_at ? parseTimestamp(song.approved_at) : null,
-      release_at: song.release_at ? parseTimestamp(song.release_at) : null,
+      release_at: parseTimestamp(song.release_at),
     }));
 }
 
@@ -1640,10 +1902,10 @@ function songTable(songs, categoryNames) {
             h("td", {}, `${uploadedFormat.format(song.created_at)} Uhr`),
             h(
               "td",
-              { class: song.approved_at ? "" : "muted" },
-              song.approved_at
-                ? `freigegeben am ${approvedFormat.format(song.approved_at)}`
-                : `wartet, frühestens ${formatReleaseDay(expectedReleaseDay(song))}`,
+              { class: song.release_at <= new Date() ? "" : "muted" },
+              song.release_at <= new Date()
+                ? `freigegeben am ${approvedFormat.format(song.release_at)}`
+                : `wartet bis ${formatReleaseMoment(song.release_at)}`,
             ),
           ),
         ),
@@ -1744,6 +2006,71 @@ function folderSummary() {
   ].join(" · ");
 }
 
+function existingSongInCategory() {
+  return (state.reference?.songs ?? []).find(
+    (song) => song.category_id === state.categoryId && song.name.normalize("NFC").toLowerCase() === state.songName.toLowerCase(),
+  );
+}
+
+const updateModes = [
+  ["all", "Song aktualisieren", "Noten und Playbacks"],
+  ["sheetMusic", "Nur Noten aktualisieren", "Ordner „Playbacks“ wird ignoriert"],
+  ["playbacks", "Nur Playbacks aktualisieren", "Ordner „Noten“ wird ignoriert"],
+];
+
+const updateModeSummaries = { all: "Noten und Playbacks", sheetMusic: "Nur Noten", playbacks: "Nur Playbacks" };
+
+async function chooseUpdate(song, mode) {
+  state.updateLoading = true;
+  state.updateError = null;
+  render();
+  try {
+    const existing = state.update?.songId === song.id ? state.update.existing : await loadExistingSong(song.id);
+    const firstChoice = state.update == null;
+    state.update = { mode, songId: song.id, existing };
+    if (firstChoice) state.publisher = { name: existing.publisher_name ?? "", url: existing.publisher_url ?? "" };
+  } catch (error) {
+    state.updateLoading = false;
+    if (error instanceof SessionExpired) return;
+    state.updateError = "Song nicht geladen. Erneut versuchen.";
+    render();
+    return;
+  }
+  state.updateLoading = false;
+  state.result = null;
+  render();
+}
+
+function updateCard(song) {
+  const pending = state.update?.existing.pending_release_at ?? null;
+  return h(
+    "section",
+    { class: "card update-choice" },
+    h("h2", {}, `„${song.name}“ gibt es hier schon`),
+    h(
+      "div",
+      { class: "option-list update-options", role: "group", "aria-label": "Song aktualisieren" },
+      updateModes.map(([mode, label, detail]) =>
+        h(
+          "button",
+          {
+            type: "button",
+            class: "option",
+            disabled: state.updateLoading || state.checking,
+            "aria-pressed": String(state.update?.mode === mode),
+            onclick: () => chooseUpdate(song, mode),
+          },
+          h("span", { class: "option-dot", "aria-hidden": "true" }),
+          h("span", { class: "option-text" }, h("span", { class: "option-label" }, label), h("span", { class: "option-detail" }, detail)),
+        ),
+      ),
+    ),
+    pending ? h("p", { class: "warning-note" }, `Es wartet schon eine Änderung (Freigabe ${formatReleaseMoment(parseTimestamp(pending))}). Sie wird durch diese ersetzt.`) : null,
+    state.updateLoading ? h("p", { class: "muted", role: "status" }, "Lade Song …") : null,
+    state.updateError ? h("p", { class: "form-error", role: "alert" }, state.updateError) : null,
+  );
+}
+
 function renderCategoryStep() {
   const categories = state.reference?.categories ?? [];
   const choose = (id) => {
@@ -1751,9 +2078,12 @@ function renderCategoryStep() {
       state.categoryId = id;
       state.result = null;
       state.checkError = null;
+      state.update = null;
+      state.updateError = null;
     }
     render();
   };
+  const existingSong = state.categoryId == null ? null : existingSongInCategory();
   const proceed = () => {
     if (state.result) {
       goTo(2);
@@ -1790,6 +2120,7 @@ function renderCategoryStep() {
         );
       }),
     ),
+    existingSong ? updateCard(existingSong) : null,
     state.checkError
       ? h("p", { class: "form-error", role: "alert" }, state.checkError, " ", h("button", { class: "link", type: "button", onclick: runCheck }, "Erneut versuchen"))
       : null,
@@ -1799,7 +2130,7 @@ function renderCategoryStep() {
         {
           class: "button primary",
           type: "button",
-          disabled: state.categoryId == null || state.checking,
+          disabled: state.categoryId == null || state.checking || (existingSong != null && state.update == null),
           onclick: proceed,
         },
         state.checking ? "Prüfe …" : "Weiter",
@@ -1904,8 +2235,16 @@ function renderSheetMusicStep() {
   );
   const allRows = sortByName(files.map((entry) => ({ path: entry.path, status: fileStatus(entry.path) })));
   const rows = filterRows(allRows);
+  const updating = state.update != null;
+  const levelsById = new Map(state.reference.levels.map((level) => [level.id, level]));
+  const keptNames = keptExisting("sheetMusic").map((entry) => {
+    const part = partsById.get(entry.part_id);
+    const level = levelsById.get(entry.level_id);
+    const label = part ? instrumentLabel(part) : `Stimme ${entry.part_id}`;
+    return level && level.name.toLowerCase() !== "normal" ? `${label} ${level.name}` : label;
+  });
   return [
-    pageTitle("Noten", `${result.sheet_music.length} von ${files.length} werden hochgeladen`),
+    pageTitle("Noten", updating ? changeSubtitle(result.sheet_music, sheetChange, files.length) : `${result.sheet_music.length} von ${files.length} werden hochgeladen`),
     messagesBlock("sheetMusic", stackMessagesFor("sheetMusic")),
     files.length === 0
       ? h("section", { class: "card" }, h("p", { class: "muted" }, "Keine Noten"))
@@ -1929,7 +2268,17 @@ function renderSheetMusicStep() {
               h(
                 "thead",
                 {},
-                h("tr", {}, h("th", {}, ""), h("th", {}, "Datei"), h("th", {}, "Stimme"), h("th", {}, "Stimmung"), h("th", {}, "Level"), h("th", {}, "Sichtbar für")),
+                h(
+                  "tr",
+                  {},
+                  h("th", {}, ""),
+                  h("th", {}, "Datei"),
+                  updating ? h("th", {}, "Änderung") : null,
+                  h("th", {}, "Stimme"),
+                  h("th", {}, "Stimmung"),
+                  h("th", {}, "Level"),
+                  h("th", {}, "Sichtbar für"),
+                ),
               ),
               rows.map((row) => {
                 const sheet = sheetByPath.get(row.path);
@@ -1943,6 +2292,7 @@ function renderSheetMusicStep() {
                     { class: sheet ? "" : "unmatched" },
                     h("td", {}, statusIcon(row.status)),
                     h("td", {}, fileName(row.path)),
+                    updating ? h("td", {}, sheet ? changeTag(sheetChange(sheet)) : "–") : null,
                     h("td", {}, part?.name ?? "–"),
                     h("td", {}, part ? part.transposition || "–" : "–"),
                     h("td", {}, sheet?.level_name ?? "–"),
@@ -1952,12 +2302,13 @@ function renderSheetMusicStep() {
                       sheet ? (viewers.length > 0 ? viewerList(viewers) : "niemand") : "–",
                     ),
                   ),
-                  6,
+                  updating ? 7 : 6,
                 );
               }),
             ),
           ),
         ),
+    keptCard("Noten nicht im Ordner, bleiben unverändert", keptNames),
     publisherCard(),
     pageNavigation({ next: nextButton() }),
   ];
@@ -2527,8 +2878,14 @@ function renderPlaybacksStep() {
       usage.get(letter.count_in).add(playback.path);
     }
   }
+  const updating = state.update != null;
+  const keptPlaybacks = keptExisting("playbacks").map((entry) => entry.type);
+  const keptCountIns = keptExisting("countIns").map((entry) => entry.name);
   return [
-    pageTitle("Playbacks", `${result.playbacks.length} von ${audioFiles.length} werden hochgeladen`),
+    pageTitle(
+      "Playbacks",
+      updating ? changeSubtitle(result.playbacks, playbackChange, audioFiles.length) : `${result.playbacks.length} von ${audioFiles.length} werden hochgeladen`,
+    ),
     messagesBlock("playbacks", stackMessagesFor("playbacks")),
     filter ? h("div", { class: "toolbar" }, filter) : null,
     filterEmpty([...rows, ...countInRows]),
@@ -2577,7 +2934,12 @@ function renderPlaybacksStep() {
                     h("div", {}, h("h3", {}, playback ? playback.type : basename(effectivePath(row.path))), h("div", { class: "playback-file" }, fileName(row.path))),
                   ),
                   playback
-                    ? h("span", { class: "playback-meta" }, `${formatDuration(playback.duration_ms)} · ${plural(playback.letters.length, "Buchstabe", "Buchstaben")}`)
+                    ? h(
+                        "span",
+                        { class: "playback-meta" },
+                        changeTag(updating ? playbackChange(playback) : null),
+                        `${formatDuration(playback.duration_ms)} · ${plural(playback.letters.length, "Buchstabe", "Buchstaben")}`,
+                      )
                     : h("span", { class: "tag" }, "Wird nicht hochgeladen"),
                 ),
                 inlineMessages(row.path),
@@ -2622,7 +2984,21 @@ function renderPlaybacksStep() {
             h(
               "table",
               { class: "file-table" },
-              h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, ""), h("th", {}, "Name"), h("th", {}, "Länge"), h("th", {}, "Genutzt von"), h("th", {}, "Datei"))),
+              h(
+                "thead",
+                {},
+                h(
+                  "tr",
+                  {},
+                  h("th", {}, ""),
+                  h("th", {}, ""),
+                  h("th", {}, "Name"),
+                  updating ? h("th", {}, "Änderung") : null,
+                  h("th", {}, "Länge"),
+                  h("th", {}, "Genutzt von"),
+                  h("th", {}, "Datei"),
+                ),
+              ),
               countInRows.map((row) => {
                 const countIn = countInsByPath.get(row.path);
                 return rowGroup(
@@ -2640,17 +3016,20 @@ function renderPlaybacksStep() {
                         : null,
                     ),
                     h("td", {}, countIn ? h("strong", {}, countIn.name) : "–"),
+                    updating ? h("td", {}, countIn ? changeTag(countInChange(countIn)) : "–") : null,
                     h("td", {}, countIn ? `${(countIn.duration_ms / 1000).toFixed(1).replace(".", ",")} s` : "–"),
                     h("td", {}, countIn ? plural(usage.get(countIn.name)?.size ?? 0, "Playback", "Playbacks") : "–"),
                     h("td", {}, fileName(row.path)),
                   ),
-                  6,
+                  updating ? 7 : 6,
                 );
               }),
             ),
           ),
         )
       : null,
+    keptCard("Playbacks nicht im Ordner, bleiben unverändert", keptPlaybacks),
+    keptCard("Einzähler nicht im Ordner, bleiben unverändert", keptCountIns),
     pageNavigation({ next: nextButton() }),
   ];
 }
@@ -2758,7 +3137,7 @@ function releaseSection(disabled) {
     h(
       "div",
       { class: "release-options" },
-      h("h2", {}, "Freigabe"),
+      h("h2", {}, state.update ? "Freigabe der Änderungen" : "Freigabe"),
       h(
         "div",
         { class: "option-list", role: "group", "aria-label": "Freigabe" },
@@ -2867,7 +3246,13 @@ function uploadCard() {
     {
       title: "Allgemein",
       messages: messagesFor("overview").filter(isOpen),
-      notes: result.playbacks.length === 0 && result.sheet_music.length === 0 ? ["Nichts zum Hochladen"] : [],
+      notes: state.update
+        ? updateHasChanges()
+          ? []
+          : ["Keine Änderungen gegenüber dem Stand in der App"]
+        : result.playbacks.length === 0 && result.sheet_music.length === 0
+          ? ["Nichts zum Hochladen"]
+          : [],
       renderRow: (message) => messageRow(message, { showPath: true }),
     },
     {
@@ -2943,10 +3328,31 @@ function uploadCard() {
         h(
           "button",
           { class: "button primary large", type: "button", disabled: reasons.length > 0 || running, onclick: startUpload },
-          running ? "Lädt hoch …" : demo ? "Manifest anzeigen" : "Hochladen",
+          running ? "Lädt hoch …" : demo ? "Manifest anzeigen" : state.update ? "Änderungen hochladen" : "Hochladen",
         ),
         reasons.length > 0 ? h("span", { class: "muted small" }, "Erst die Punkte oben erledigen") : null,
       ),
+    ),
+  );
+}
+
+function doneText(upload, songName) {
+  if (!upload.updating) return `„${songName}“ erscheint am ${formatReleaseDay(upload.releaseDay)} in der App.`;
+  if (!upload.rowsChanged) return `Verlag und Link von „${songName}“ sind geändert und gelten sofort.`;
+  if (!upload.releaseAt) return `Die Änderungen an „${songName}“ sind gespeichert.`;
+  if (songWaitingForRelease()) return `Die Änderungen gelten sofort. „${songName}“ erscheint wie geplant am ${formatReleaseMoment(upload.releaseAt)} in der App.`;
+  return `Die Änderungen an „${songName}“ erscheinen am ${formatReleaseMoment(upload.releaseAt)} in der App. Bis dahin bleibt der alte Stand sichtbar.`;
+}
+
+function waitingSongRelease() {
+  return h(
+    "section",
+    { class: "card" },
+    h("h2", {}, "Freigabe"),
+    h(
+      "p",
+      { class: "muted" },
+      `„${state.songName}“ wartet noch auf seine Freigabe am ${formatReleaseMoment(parseTimestamp(state.update.existing.release_at))}. Die Änderungen gelten deshalb sofort.`,
     ),
   );
 }
@@ -2957,7 +3363,7 @@ function renderOverviewStep() {
   const upload = state.upload;
   const running = upload?.status === "running";
   const sizes = new Map(state.files.map((entry) => [entry.path, entry.size]));
-  const totalBytes = manifestPaths(result).reduce((sum, path) => sum + (sizes.get(path) ?? 0), 0);
+  const totalBytes = manifestPaths(state.update ? buildManifest() : result).reduce((sum, path) => sum + (sizes.get(path) ?? 0), 0);
   const renamed = Object.keys(state.renames).length;
   const publisherUrlCheck = publisherUrl();
   const publisher = { name: publisherName().value, url: publisherUrlCheck.value, host: publisherUrlCheck.host };
@@ -2968,24 +3374,39 @@ function renderOverviewStep() {
         "section",
         { class: "card outcome success" },
         h("span", { class: "outcome-icon", "aria-hidden": "true" }, "✓"),
-        h("h1", {}, "Hochgeladen"),
-        h("p", {}, `„${result.song_name}“ erscheint am ${formatReleaseDay(upload.releaseDay)} in der App.`),
+        h("h1", {}, upload.updating ? "Gespeichert" : "Hochgeladen"),
+        h("p", {}, doneText(upload, result.song_name)),
         h("button", { class: "button primary", type: "button", onclick: resetSong }, "Nächsten Song wählen"),
       ),
     ];
   }
 
   const tile = (value, label) => h("div", { class: "stat" }, h("span", { class: "stat-value" }, value), h("span", { class: "stat-label" }, label));
+  const totals = state.update
+    ? [countChanges(result.sheet_music, sheetChange), countChanges(result.playbacks, playbackChange), countChanges(result.count_ins, countInChange)].reduce(
+        (sum, item) => ({ new: sum.new + item.new, changed: sum.changed + item.changed, unchanged: sum.unchanged + item.unchanged }),
+        { new: 0, changed: 0, unchanged: 0 },
+      )
+    : null;
   return [
-    pageTitle("Überblick", null),
-    h(
-      "div",
-      { class: "stats" },
-      tile(String(result.sheet_music.length), "Noten"),
-      tile(String(result.playbacks.length), result.playbacks.length === 1 ? "Playback" : "Playbacks"),
-      tile(String(result.count_ins.length), "Einzähler"),
-      tile(formatBytes(totalBytes), "Größe"),
-    ),
+    pageTitle(state.update ? "Überblick der Änderungen" : "Überblick", null),
+    totals
+      ? h(
+          "div",
+          { class: "stats" },
+          tile(String(totals.new), "Neu"),
+          tile(String(totals.changed), "Geändert"),
+          tile(String(totals.unchanged), "Unverändert"),
+          tile(formatBytes(totalBytes), "Größe"),
+        )
+      : h(
+          "div",
+          { class: "stats" },
+          tile(String(result.sheet_music.length), "Noten"),
+          tile(String(result.playbacks.length), result.playbacks.length === 1 ? "Playback" : "Playbacks"),
+          tile(String(result.count_ins.length), "Einzähler"),
+          tile(formatBytes(totalBytes), "Größe"),
+        ),
     h(
       "section",
       { class: "card" },
@@ -2996,6 +3417,7 @@ function renderOverviewStep() {
         h("dd", {}, result.song_name),
         h("dt", {}, "Kategorie"),
         h("dd", {}, category?.name ?? "–"),
+        state.update ? [h("dt", {}, "Aktualisiert"), h("dd", {}, ownValue(updateModeSummaries, state.update.mode) ?? "–")] : null,
         h("dt", {}, "Playbacks"),
         h(
           "dd",
@@ -3060,7 +3482,7 @@ function renderOverviewStep() {
           : null,
       ),
     ),
-    upload?.status === "demo" ? null : releaseSection(running),
+    upload?.status === "demo" ? null : songWaitingForRelease() ? waitingSongRelease() : releaseSection(running),
     upload?.status === "demo"
       ? h(
           "section",
@@ -3078,6 +3500,7 @@ function renderOverviewStep() {
 function render() {
   const renderers = [renderFolderStep, renderCategoryStep, renderSheetMusicStep, renderPlaybacksStep, renderOverviewStep];
   if (!stepAvailable(state.step)) state.step = stepAvailable(1) ? 1 : 0;
+  while (stepHidden(state.step)) state.step++;
   const busy = state.checking && state.step >= 2;
   const content = busy
     ? [h("section", { class: "card busy" }, h("span", { class: "spinner", "aria-hidden": "true" }), h("p", { class: "hint", role: "status" }, "Prüfe Dateien …"))]

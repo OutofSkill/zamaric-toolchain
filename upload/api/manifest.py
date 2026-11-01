@@ -91,8 +91,9 @@ class CountIn(StrictModel):
     duration_ms: int
 
 
-class Playback(StrictModel):
-    path: AudioPath
+class PlaybackFields(StrictModel):
+    """Was ein neues und ein geändertes Playback gemeinsam haben."""
+
     type: CleanName
     # Wird beim Upload durch die mit mutagen gemessene Länge ersetzt.
     duration_ms: int
@@ -101,7 +102,7 @@ class Playback(StrictModel):
     letters: list[Letter]
 
     @model_validator(mode="after")
-    def check_instruments_and_letters(self) -> "Playback":
+    def check_instruments_and_letters(self) -> "PlaybackFields":
         if (self.instrument_mode == "all") != (len(self.instrument_ids) == 0):
             raise ValueError(f"instrument_ids passen nicht zu instrument_mode bei {self.type!r}")
         if len(set(self.instrument_ids)) != len(self.instrument_ids):
@@ -110,6 +111,15 @@ class Playback(StrictModel):
         if any(later <= earlier for earlier, later in zip(positions, positions[1:])):
             raise ValueError(f"Buchstaben nicht streng aufsteigend bei {self.type!r}")
         return self
+
+
+class Playback(PlaybackFields):
+    path: AudioPath
+
+
+class ChangedPlayback(PlaybackFields):
+    # null = die MP3 bleibt, nur Buchstaben oder Sichtbarkeit ändern sich
+    path: AudioPath | None
 
 
 class SheetMusic(StrictModel):
@@ -157,6 +167,40 @@ class Manifest(StrictModel):
         return [
             *(count_in.path for count_in in self.count_ins),
             *(playback.path for playback in self.playbacks),
+            *(sheet.path for sheet in self.sheet_music),
+        ]
+
+
+class UpdateManifest(StrictModel):
+    """Änderung an einem bestehenden Song. Die Listen enthalten nur neue und
+    geänderte Einträge, alles andere bleibt, wie es ist. update_song in der DB
+    ordnet sie den bestehenden Zeilen zu und prüft die Einzähler der Buchstaben,
+    denn die können auch zu unveränderten Einzählern gehören."""
+
+    song_id: int
+    release_at: AwareDatetime | None
+    publisher_name: CleanName | None
+    publisher_url: PublisherUrl | None
+    count_ins: list[CountIn]
+    playbacks: list[ChangedPlayback]
+    sheet_music: list[SheetMusic]
+
+    @model_validator(mode="after")
+    def check_changes(self) -> "UpdateManifest":
+        if has_duplicates([playback.type.lower() for playback in self.playbacks]):
+            raise ValueError("type doppelt")
+        if has_duplicates([count_in.name.lower() for count_in in self.count_ins]):
+            raise ValueError("Einzähler doppelt")
+        if has_duplicates([(sheet.part_id, sheet.level_id) for sheet in self.sheet_music]):
+            raise ValueError("Noten mit gleicher Stimme und gleichem Level doppelt")
+        if has_duplicates(self.all_paths()):
+            raise ValueError("Pfad doppelt")
+        return self
+
+    def all_paths(self) -> list[str]:
+        return [
+            *(count_in.path for count_in in self.count_ins),
+            *(playback.path for playback in self.playbacks if playback.path is not None),
             *(sheet.path for sheet in self.sheet_music),
         ]
 

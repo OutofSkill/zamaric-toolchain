@@ -281,6 +281,7 @@ export async function checkSong({
   renames,
   reference,
   inspect,
+  updating = false,
 }) {
   const messages = [];
   const add = (severity, code, path, text, extra = {}) => {
@@ -302,6 +303,7 @@ export async function checkSong({
     error("unknown_category", null, "Kategorie gibt es nicht");
   }
   if (
+    !updating &&
     reference.songs.some(
       (song) => song.category_id === categoryId && fold(song.name.normalize("NFC")) === fold(songName),
     )

@@ -1,8 +1,10 @@
-"""POST /api/upload: Song prüfen, Dateien in die Buckets laden, Zeilen über import_song eintragen.
+"""POST /api/upload und POST /api/update: Song prüfen, Dateien in die Buckets laden, Zeilen eintragen.
 
-Die Schritte entsprechen dem Ablauf in der README (Upload-Tool → POST /api/upload).
+Neue Songs trägt import_song ein, Änderungen an bestehenden update_song. Die
+Schritte entsprechen dem Ablauf in der README (Upload-Tool → POST /api/upload).
 """
 
+import hashlib
 import logging
 import uuid
 
@@ -10,7 +12,7 @@ import httpx
 from fastapi import Request
 from mutagen import MutagenError
 from mutagen.mp3 import MP3
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 # request.form() liefert Starlettes UploadFile, nicht die Unterklasse von FastAPI
 from starlette.datastructures import UploadFile
@@ -18,7 +20,7 @@ from starlette.exceptions import HTTPException
 from supabase import PostgrestAPIError, StorageException
 
 from errors import ApiError
-from manifest import Manifest
+from manifest import Manifest, UpdateManifest
 from sessions import Session, fresh_client
 
 logger = logging.getLogger("upload")
@@ -33,8 +35,11 @@ MAX_FIELD_BYTES = 1024 * 1024
 AUDIO_BUCKET = "audio"
 SHEET_MUSIC_BUCKET = "sheet_music"
 
-# Fehler von import_song (raise exception '<code>') → Antwort an den Browser
-IMPORT_ERRORS = {
+# So viele Dateien löscht ein Aufruf von storage.remove() auf einmal
+REMOVE_BATCH_SIZE = 100
+
+# Fehler von import_song und update_song (raise exception '<code>') → Antwort an den Browser
+DATABASE_ERRORS = {
     "song_exists": 409,
     "invalid_manifest": 422,
     "forbidden": 403,
@@ -44,15 +49,24 @@ path_list = TypeAdapter(list[str])
 
 
 async def upload_song(request: Request, session: Session) -> None:
-    # Schritt 1 (Session prüfen) hat FastAPI schon über current_session erledigt.
+    """Neuer Song. Schritt 1 (Session prüfen) hat FastAPI schon über current_session erledigt."""
+    await receive(request, Manifest, lambda manifest, files: import_files(session, manifest, files))
+
+
+async def update_song(request: Request, session: Session) -> str:
+    """Änderung an einem bestehenden Song. Gibt den Zeitpunkt zurück, ab dem sie sichtbar ist."""
+    return await receive(request, UpdateManifest, lambda manifest, files: update_files(session, manifest, files))
+
+
+async def receive(request: Request, model: type[BaseModel], handle):
     try:
         form_context = request.form(max_files=MAX_FILES, max_fields=10, max_part_size=MAX_FIELD_BYTES)
         async with form_context as form:
-            manifest, files_by_path = read_form(form)
+            manifest, files_by_path = read_form(form, model)
             try:
-                await import_files(session, manifest, files_by_path)
+                return await handle(manifest, files_by_path)
             except ApiError as error:
-                error.song = manifest.song_name
+                error.song = getattr(manifest, "song_name", None) or f"ID {manifest.song_id}"
                 raise
     except HTTPException as error:
         # Starlette meldet Verstöße gegen die Grenzen von request.form() als
@@ -63,7 +77,7 @@ async def upload_song(request: Request, session: Session) -> None:
         raise ApiError(422, "invalid_manifest", str(error.detail)) from None
 
 
-def read_form(form) -> tuple[Manifest, dict[str, UploadFile]]:
+def read_form(form, model: type[BaseModel]) -> tuple[BaseModel, dict[str, UploadFile]]:
     """Schritte 2 und 3: Manifest prüfen und jeder Datei ihren Pfad zuordnen."""
     manifest_text = form.get("manifest")
     paths_text = form.get("paths")
@@ -74,7 +88,7 @@ def read_form(form) -> tuple[Manifest, dict[str, UploadFile]]:
         raise ApiError(422, "invalid_manifest", "Feld files enthält Text statt einer Datei")
 
     try:
-        manifest = Manifest.model_validate_json(manifest_text)
+        manifest = model.model_validate_json(manifest_text)
         paths = path_list.validate_json(paths_text)
     except ValidationError as error:
         raise ApiError(422, "invalid_manifest", str(error)) from None
@@ -101,32 +115,57 @@ def read_form(form) -> tuple[Manifest, dict[str, UploadFile]]:
 
 
 async def import_files(session: Session, manifest: Manifest, files_by_path: dict[str, UploadFile]) -> None:
-    # Schritte 4 und 5: erst alles prüfen und messen, dann hochladen. So
-    # hinterlässt eine kaputte Datei keine schon hochgeladenen Dateien im Bucket.
+    durations = measure_files(manifest, files_by_path)
+    hashes = {path: file_sha256(file) for path, file in files_by_path.items()}
+    stored_names = await store_files(session, manifest, files_by_path)
+
+    # Schritt 7: alle Zeilen in einer Transaktion eintragen
+    payload = {
+        "category_id": manifest.category_id,
+        "song_name": manifest.song_name,
+        "release_at": manifest.release_at.isoformat() if manifest.release_at else None,
+        "publisher_name": manifest.publisher_name,
+        "publisher_url": manifest.publisher_url,
+        **file_entries(manifest, stored_names, durations, hashes),
+    }
+    song_id = await call_database(session, "import_song", payload)
+    logger.info("Song %r hochgeladen (ID %s, %d Dateien)", manifest.song_name, song_id, len(stored_names))
+
+
+async def update_files(session: Session, manifest: UpdateManifest, files_by_path: dict[str, UploadFile]) -> str:
+    durations = measure_files(manifest, files_by_path)
+    hashes = {path: file_sha256(file) for path, file in files_by_path.items()}
+    stored_names = await store_files(session, manifest, files_by_path)
+
+    payload = {
+        "song_id": manifest.song_id,
+        "release_at": manifest.release_at.isoformat() if manifest.release_at else None,
+        "publisher_name": manifest.publisher_name,
+        "publisher_url": manifest.publisher_url,
+        **file_entries(manifest, stored_names, durations, hashes),
+    }
+    release_at = await call_database(session, "update_song", payload)
+    logger.info("Song ID %s geändert (%d Dateien, sichtbar ab %s)", manifest.song_id, len(stored_names), release_at)
+    return release_at
+
+
+def measure_files(manifest: Manifest | UpdateManifest, files_by_path: dict[str, UploadFile]) -> dict[str, int]:
+    """Schritte 4 und 5: erst alles prüfen und messen, dann hochladen. So
+    hinterlässt eine kaputte Datei keine schon hochgeladenen Dateien im Bucket."""
     durations = {}
     for count_in in manifest.count_ins:
         durations[count_in.path] = measure_mp3(count_in.path, files_by_path[count_in.path])
     for playback in manifest.playbacks:
+        # Ohne path bleibt die MP3, die Buchstaben prüft dann update_song gegen ihre Länge
+        if playback.path is None:
+            continue
         durations[playback.path] = measure_mp3(playback.path, files_by_path[playback.path])
         for letter in playback.letters:
             if letter.position_ms > durations[playback.path]:
                 raise ApiError(422, "invalid_manifest", f"Buchstabe {letter.name!r} hinter dem Ende von {playback.path!r}")
     for sheet in manifest.sheet_music:
         check_pdf(sheet.path, files_by_path[sheet.path])
-
-    # Schritt 6: Dateien hochladen. Im Bucket heißen sie nur <uuid>.mp3 bzw.
-    # <uuid>.pdf, der Pfad aus dem Ordner des Partners taucht dort nicht auf.
-    stored_names = {}
-    for count_in in manifest.count_ins:
-        stored_names[count_in.path] = await store_file(session, AUDIO_BUCKET, files_by_path[count_in.path])
-    for playback in manifest.playbacks:
-        stored_names[playback.path] = await store_file(session, AUDIO_BUCKET, files_by_path[playback.path])
-    for sheet in manifest.sheet_music:
-        stored_names[sheet.path] = await store_file(session, SHEET_MUSIC_BUCKET, files_by_path[sheet.path])
-
-    # Schritt 7: alle Zeilen in einer Transaktion eintragen
-    song_id = await call_import_song(session, build_payload(manifest, stored_names, durations))
-    logger.info("Song %r hochgeladen (ID %s, %d Dateien)", manifest.song_name, song_id, len(stored_names))
+    return durations
 
 
 def measure_mp3(path: str, file: UploadFile) -> int:
@@ -150,6 +189,29 @@ def check_pdf(path: str, file: UploadFile) -> None:
         raise ApiError(422, "invalid_file_content", f"{path!r} beginnt nicht mit %PDF")
 
 
+def file_sha256(file: UploadFile) -> str:
+    """Prüfsumme der Datei. Container 2 rechnet sie selbst, statt der Website zu glauben."""
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: file.file.read(1024 * 1024), b""):
+        digest.update(chunk)
+    file.file.seek(0)
+    return digest.hexdigest()
+
+
+async def store_files(session: Session, manifest: Manifest | UpdateManifest, files_by_path: dict[str, UploadFile]) -> dict[str, str]:
+    """Schritt 6: Dateien hochladen. Im Bucket heißen sie nur <uuid>.mp3 bzw.
+    <uuid>.pdf, der Pfad aus dem Ordner des Partners taucht dort nicht auf."""
+    stored_names = {}
+    for count_in in manifest.count_ins:
+        stored_names[count_in.path] = await store_file(session, AUDIO_BUCKET, files_by_path[count_in.path])
+    for playback in manifest.playbacks:
+        if playback.path is not None:
+            stored_names[playback.path] = await store_file(session, AUDIO_BUCKET, files_by_path[playback.path])
+    for sheet in manifest.sheet_music:
+        stored_names[sheet.path] = await store_file(session, SHEET_MUSIC_BUCKET, files_by_path[sheet.path])
+    return stored_names
+
+
 async def store_file(session: Session, bucket: str, file: UploadFile) -> str:
     """Lädt eine Datei unter einem zufälligen Namen hoch und gibt den Namen zurück."""
     if bucket == AUDIO_BUCKET:
@@ -167,27 +229,31 @@ async def store_file(session: Session, bucket: str, file: UploadFile) -> str:
     return name
 
 
-def build_payload(manifest: Manifest, stored_names: dict[str, str], durations: dict[str, int]) -> dict:
-    """Das Manifest für import_song: Pfade durch die Namen im Bucket ersetzt, Längen gemessen."""
+def file_entries(
+    manifest: Manifest | UpdateManifest,
+    stored_names: dict[str, str],
+    durations: dict[str, int],
+    hashes: dict[str, str],
+) -> dict:
+    """Einzähler, Playbacks und Noten für die DB: Pfade durch die Namen im Bucket
+    ersetzt, Längen gemessen, Prüfsummen gerechnet. Ein Playback ohne path
+    behält seine MP3, update_song übernimmt dann Länge und Prüfsumme."""
     return {
-        "category_id": manifest.category_id,
-        "song_name": manifest.song_name,
-        "release_at": manifest.release_at.isoformat() if manifest.release_at else None,
-        "publisher_name": manifest.publisher_name,
-        "publisher_url": manifest.publisher_url,
         "count_ins": [
             {
                 "path": stored_names[count_in.path],
                 "name": count_in.name,
                 "duration_ms": durations[count_in.path],
+                "sha256": hashes[count_in.path],
             }
             for count_in in manifest.count_ins
         ],
         "playbacks": [
             {
-                "path": stored_names[playback.path],
+                "path": stored_names[playback.path] if playback.path else None,
                 "type": playback.type,
-                "duration_ms": durations[playback.path],
+                "duration_ms": durations[playback.path] if playback.path else None,
+                "sha256": hashes[playback.path] if playback.path else None,
                 "instrument_mode": playback.instrument_mode,
                 "instrument_ids": playback.instrument_ids,
                 "letters": [letter.model_dump() for letter in playback.letters],
@@ -199,18 +265,19 @@ def build_payload(manifest: Manifest, stored_names: dict[str, str], durations: d
                 "path": stored_names[sheet.path],
                 "part_id": sheet.part_id,
                 "level_id": sheet.level_id,
+                "sha256": hashes[sheet.path],
             }
             for sheet in manifest.sheet_music
         ],
     }
 
 
-async def call_import_song(session: Session, payload: dict) -> int:
+async def call_database(session: Session, function: str, payload: dict):
     client = await fresh_client(session)
     try:
-        response = await client.rpc("import_song", {"payload": payload}).execute()
+        response = await client.rpc(function, {"payload": payload}).execute()
     except PostgrestAPIError as error:
-        status = IMPORT_ERRORS.get(error.message)
+        status = DATABASE_ERRORS.get(error.message)
         detail = f"{error.message}: {error.details}"
         if status is None:
             raise ApiError(502, "database_failed", detail) from None
@@ -218,3 +285,24 @@ async def call_import_song(session: Session, payload: dict) -> int:
     except httpx.HTTPError as error:
         raise ApiError(502, "database_failed", str(error)) from None
     return response.data
+
+
+async def remove_unused_files(session: Session) -> None:
+    """Löscht Dateien im Bucket, auf die keine Zeile mehr zeigt (unused_files).
+
+    Läuft nach der Antwort an den Browser. Ein Fehler landet nur im Log, beim
+    nächsten Upload wird es erneut versucht.
+    """
+    try:
+        client = await fresh_client(session)
+        rows = (await client.rpc("unused_files").execute()).data or []
+        names_by_bucket: dict[str, list[str]] = {}
+        for row in rows:
+            names_by_bucket.setdefault(row["bucket"], []).append(row["name"])
+        for bucket, names in names_by_bucket.items():
+            for start in range(0, len(names), REMOVE_BATCH_SIZE):
+                await client.storage.from_(bucket).remove(names[start : start + REMOVE_BATCH_SIZE])
+        if rows:
+            logger.info("%d unbenutzte Dateien im Bucket gelöscht", len(rows))
+    except Exception as error:
+        logger.warning("Aufräumen im Bucket fehlgeschlagen (%s)", type(error).__name__)

@@ -80,11 +80,22 @@ export const demoReference = {
   instrument_parts: instrumentParts,
   songs: [
     {
+      id: 1,
       category_id: 1,
       name: "Tequila",
       created_at: "2026-10-20T19:12:00.000000+00:00",
-      approved_at: "2026-10-22T02:00:00.000000+00:00",
-      release_at: null,
+      release_at: "2026-10-22T02:00:00.000000+00:00",
     },
   ],
+};
+
+export const demoExistingSong = {
+  song_id: 1,
+  release_at: "2026-10-22T02:00:00.000000+00:00",
+  pending_release_at: null,
+  publisher_name: null,
+  publisher_url: null,
+  count_ins: [],
+  playbacks: [],
+  sheet_music: [],
 };

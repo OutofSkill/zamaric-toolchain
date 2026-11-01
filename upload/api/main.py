@@ -7,7 +7,7 @@ Container 1 (nginx) leitet alle Anfragen an /api/* unverändert hierher weiter.
 import logging
 import sys
 
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,7 +18,8 @@ from config import settings
 from errors import ApiError
 from reference import load_reference
 from sessions import COOKIE_NAME, Session, current_session, existing_session, fresh_client
-from upload import upload_song
+from songs import load_song
+from upload import remove_unused_files, update_song, upload_song
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
 logger = logging.getLogger("upload")
@@ -112,7 +113,26 @@ async def get_reference(session: Session = Depends(current_session)) -> dict:
     return await load_reference(await fresh_client(session))
 
 
+@app.get("/api/songs/{song_id}")
+async def get_song(song_id: int, session: Session = Depends(current_session)) -> dict:
+    return await load_song(await fresh_client(session), song_id)
+
+
+# Nach einem Upload oder einer Änderung räumt Container 2 im Hintergrund
+# Dateien weg, auf die keine Zeile mehr zeigt.
 @app.post("/api/upload", status_code=201, dependencies=[Depends(require_own_origin)])
-async def post_upload(request: Request, session: Session = Depends(current_session)) -> Response:
+async def post_upload(
+    request: Request, background_tasks: BackgroundTasks, session: Session = Depends(current_session)
+) -> Response:
     await upload_song(request, session)
+    background_tasks.add_task(remove_unused_files, session)
     return Response(status_code=201)
+
+
+@app.post("/api/update", status_code=201, dependencies=[Depends(require_own_origin)])
+async def post_update(
+    request: Request, background_tasks: BackgroundTasks, session: Session = Depends(current_session)
+) -> dict:
+    release_at = await update_song(request, session)
+    background_tasks.add_task(remove_unused_files, session)
+    return {"release_at": release_at}

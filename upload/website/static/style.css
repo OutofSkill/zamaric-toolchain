@@ -398,6 +398,30 @@ input[type="radio"] {
   gap: 16px;
 }
 
+.tag.change.new {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tag.change.changed {
+  background: var(--warning-surface);
+  color: var(--warning);
+}
+
+.playback-meta .tag.change {
+  margin-right: 8px;
+}
+
+.update-options {
+  max-width: none;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.warning-note {
+  color: var(--warning);
+  font-weight: 600;
+}
+
 input.switch {
   position: relative;
   flex: none;
