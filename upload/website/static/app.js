@@ -84,6 +84,7 @@ const state = {
   cardMotion: null,
   release: { mode: "earliest", date: "", month: "" },
   publisher: { name: "", url: "" },
+  playUnderCountIn: false,
   excluded: new Set(),
   openPickers: new Set(),
   listFilter: new Map(),
@@ -1964,6 +1965,8 @@ function renderSheetMusicStep() {
 
 const decodedPlaybackLimit = 3;
 const startDelaySeconds = 0.05;
+const underCountInVolume = 0.3;
+const volumeRampSeconds = 0.02;
 
 const player = {
   path: null,
@@ -1973,6 +1976,7 @@ const player = {
   loading: false,
   startedAt: 0,
   countInStartedAt: 0,
+  countInEndsAt: 0,
   sources: [],
   request: 0,
   frame: null,
@@ -1984,6 +1988,75 @@ function isCountInPath(path) {
   return path.split("/")[1] === "Einzaehler";
 }
 
+const textEncodings = ["latin1", "utf-16", "utf-16be", "utf-8"];
+const mpegSampleRates = { 0: [11025, 12000, 8000], 2: [22050, 24000, 16000], 3: [44100, 48000, 32000] };
+
+function bigEndian(bytes, offset, length) {
+  let value = 0;
+  for (let index = 0; index < length; index++) value = value * 256 + bytes[offset + index];
+  return value;
+}
+
+function synchsafe(bytes, offset) {
+  return (bytes[offset] << 21) | (bytes[offset + 1] << 14) | (bytes[offset + 2] << 7) | bytes[offset + 3];
+}
+
+function mpegSampleRate(bytes, from) {
+  for (let offset = from; offset + 3 < bytes.length; offset++) {
+    if (bytes[offset] !== 0xff || (bytes[offset + 1] & 0xe0) !== 0xe0) continue;
+    const rates = mpegSampleRates[(bytes[offset + 1] >> 3) & 3];
+    const rate = rates?.[(bytes[offset + 2] >> 2) & 3];
+    if (rate) return rate;
+  }
+  return null;
+}
+
+function itunesGaplessText(bytes, version, tagEnd, offset) {
+  const headerLength = version === 2 ? 6 : 10;
+  const idLength = version === 2 ? 3 : 4;
+  const commentId = version === 2 ? "COM" : "COMM";
+  while (offset + headerLength <= tagEnd) {
+    const id = String.fromCharCode(...bytes.subarray(offset, offset + idLength));
+    if (!/^[A-Z0-9]+$/.test(id)) return null;
+    const size =
+      version === 2 ? bigEndian(bytes, offset + 3, 3) : version === 4 ? synchsafe(bytes, offset + 4) : bigEndian(bytes, offset + 4, 4);
+    const body = bytes.subarray(offset + headerLength, Math.min(offset + headerLength + size, tagEnd));
+    offset += headerLength + size;
+    if (id !== commentId || body.length < 5) continue;
+    const encoding = textEncodings[body[0]];
+    if (!encoding) continue;
+    const [description, ...rest] = new TextDecoder(encoding).decode(body.subarray(4)).split("\0");
+    if (description.replace(/^﻿/, "") === "iTunSMPB") return rest.join(" ").replace(/﻿/g, "");
+  }
+  return null;
+}
+
+function gaplessInfo(bytes) {
+  if (bytes.length < 10 || bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) return null;
+  const version = bytes[3];
+  if (version < 2 || version > 4) return null;
+  const tagEnd = Math.min(bytes.length, 10 + synchsafe(bytes, 6));
+  let offset = 10;
+  if (version > 2 && bytes[5] & 0x40) offset += version === 4 ? synchsafe(bytes, 10) : 4 + bigEndian(bytes, 10, 4);
+  const text = itunesGaplessText(bytes, version, tagEnd, offset);
+  const fields = text?.trim().split(/\s+/).map((field) => parseInt(field, 16));
+  const sampleRate = mpegSampleRate(bytes, tagEnd);
+  if (!fields || fields.length < 4 || fields.slice(1, 4).some(Number.isNaN) || !sampleRate || fields[3] <= 0) return null;
+  return { padding: fields[2] / sampleRate, valid: fields[3] / sampleRate };
+}
+
+function playableRange(buffer, gapless) {
+  if (!gapless || Math.abs(buffer.duration - gapless.valid) < 0.01) return { buffer, start: 0, end: buffer.duration };
+  const end = Math.max(0, buffer.duration - gapless.padding);
+  return { buffer, start: Math.max(0, end - gapless.valid), end };
+}
+
+async function decodeWithGaplessInfo(file) {
+  const bytes = await file.arrayBuffer();
+  const gapless = gaplessInfo(new Uint8Array(bytes));
+  return playableRange(await audioContext().decodeAudioData(bytes), gapless);
+}
+
 function decodeAudio(path) {
   const entry = state.files.find((candidate) => candidate.path === path);
   if (!entry) return Promise.reject(new Error("missing file"));
@@ -1993,7 +2066,7 @@ function decodeAudio(path) {
     decodedAudio.set(path, known);
     return known.promise;
   }
-  const promise = entry.file.arrayBuffer().then((buffer) => audioContext().decodeAudioData(buffer));
+  const promise = decodeWithGaplessInfo(entry.file);
   const decoded = { file: entry.file, promise };
   decodedAudio.set(path, decoded);
   promise.catch(() => {
@@ -2010,20 +2083,21 @@ function stopSources() {
   for (const source of player.sources) {
     source.onended = null;
     try {
-      source.stop();
+      source.stop?.();
     } catch {}
     source.disconnect();
   }
   player.sources = [];
 }
 
-function startSource(buffer, when, offsetSeconds, onEnded) {
+function startSource(audio, when, offsetSeconds, onEnded, output = audioContext().destination) {
   const context = audioContext();
   const source = context.createBufferSource();
-  source.buffer = buffer;
-  source.connect(context.destination);
+  source.buffer = audio.buffer;
+  source.connect(output);
   source.onended = onEnded;
-  source.start(when, Math.min(offsetSeconds, buffer.duration));
+  const from = Math.min(audio.start + offsetSeconds, audio.end);
+  source.start(when, from, Math.max(0, audio.end - from));
   player.sources.push(source);
 }
 
@@ -2033,7 +2107,7 @@ function currentPosition() {
 }
 
 function countInRunning() {
-  return player.countIn != null && (!player.playing || audioContext().currentTime < player.startedAt);
+  return player.countIn != null && (!player.playing || audioContext().currentTime < player.countInEndsAt);
 }
 
 function selectPlayback(path, position, countIn = null) {
@@ -2076,11 +2150,25 @@ async function startPlayback() {
   const [main, countIn] = buffers;
   const start = context.currentTime + startDelaySeconds;
   let mainStart = start;
+  let mainOutput = context.destination;
   if (countIn) {
+    const remaining = Math.max(0, countIn.end - countIn.start - player.countIn.offset);
+    const lead = state.playUnderCountIn ? Math.min(remaining, player.countIn.letter / 1000) : 0;
     startSource(countIn, start, player.countIn.offset, null);
-    mainStart = start + Math.max(0, countIn.duration - player.countIn.offset);
+    mainStart = start + remaining - lead;
+    player.position = player.countIn.letter - lead * 1000;
+    player.countInEndsAt = start + remaining;
+    if (lead > 0) {
+      const volume = context.createGain();
+      volume.gain.setValueAtTime(underCountInVolume, mainStart);
+      volume.gain.setValueAtTime(underCountInVolume, player.countInEndsAt);
+      volume.gain.linearRampToValueAtTime(1, player.countInEndsAt + volumeRampSeconds);
+      volume.connect(context.destination);
+      player.sources.push(volume);
+      mainOutput = volume;
+    }
   }
-  startSource(main, mainStart, player.position / 1000, playbackEnded);
+  startSource(main, mainStart, player.position / 1000, playbackEnded, mainOutput);
   player.countInStartedAt = start;
   player.startedAt = mainStart;
   player.loading = false;
@@ -2090,6 +2178,7 @@ async function startPlayback() {
 
 function pausePlayback() {
   if (player.playing && countInRunning()) {
+    player.position = Math.min(currentPosition(), player.countIn.letter);
     player.countIn.offset += Math.max(0, audioContext().currentTime - player.countInStartedAt);
   } else if (player.playing) {
     player.position = currentPosition();
@@ -2136,7 +2225,7 @@ function playLetter(path, letter) {
   } else if (letter.position_ms <= countIn.duration_ms) {
     selectPlayback(path, 0);
   } else {
-    selectPlayback(path, letter.position_ms, { name: countIn.name, path: countIn.path, offset: 0 });
+    selectPlayback(path, letter.position_ms, { name: countIn.name, path: countIn.path, letter: letter.position_ms, offset: 0 });
   }
   startPlayback();
 }
@@ -2148,7 +2237,6 @@ function stopPlayer() {
 
 function updatePlayer() {
   const position = currentPosition();
-  const inCountIn = countInRunning();
   for (const element of root.querySelectorAll("[data-player]")) {
     const active = element.dataset.player === player.path;
     const playing = active && (player.playing || player.loading);
@@ -2156,12 +2244,7 @@ function updatePlayer() {
       element.textContent = playing ? "❚❚" : "▶";
       element.setAttribute("aria-label", playing ? "Pause" : "Abspielen");
     } else if (element.classList.contains("player-time")) {
-      element.textContent =
-        active && player.loading
-          ? "Lädt …"
-          : active && inCountIn
-            ? `Einzähler ${player.countIn.name} …`
-            : `${formatDuration(active ? position : 0)} / ${formatDuration(Number(element.dataset.duration))}`;
+      element.textContent = `${formatDuration(active ? position : 0)} / ${formatDuration(Number(element.dataset.duration))}`;
     } else if (element.classList.contains("timeline")) {
       const duration = Number(element.dataset.duration);
       const playhead = element.querySelector(".timeline-playhead");
@@ -2460,6 +2543,20 @@ function renderPlaybacksStep() {
             "div",
             { class: "section-head" },
             h("h2", {}, "Playbacks", h("span", { class: "count" }, String(audioFiles.length))),
+            h(
+              "label",
+              { class: "check small" },
+              h("input", {
+                type: "checkbox",
+                class: "switch",
+                role: "switch",
+                checked: state.playUnderCountIn,
+                onchange: (event) => {
+                  state.playUnderCountIn = event.target.checked;
+                },
+              }),
+              "Playback unter dem Einzähler mitspielen",
+            ),
           ),
           bulkBar(audioFiles.map((entry) => entry.path)),
           h(
