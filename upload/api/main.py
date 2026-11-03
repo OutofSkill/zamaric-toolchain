@@ -83,10 +83,8 @@ class LoginRequest(BaseModel):
 
 
 @app.post("/api/login", status_code=204, dependencies=[Depends(require_own_origin)])
-async def post_login(body: LoginRequest, response: Response, background_tasks: BackgroundTasks) -> None:
+async def post_login(body: LoginRequest, response: Response) -> None:
     session_id = await sessions.login(body.password)
-    if claim_backfill():
-        background_tasks.add_task(backfill_missing_sha256, sessions.sessions[session_id])
     response.set_cookie(
         COOKIE_NAME,
         session_id,
@@ -113,6 +111,15 @@ async def get_session_status() -> None:
 # Verlängert die Session nicht, die Website fragt das alle paar Sekunden ab.
 @app.get("/api/checksums", dependencies=[Depends(existing_session)])
 async def get_checksum_progress() -> dict:
+    return dict(backfill_progress)
+
+
+# Startet das Nachtragen fehlender Prüfsummen im Hintergrund. Läuft schon
+# eins, kommt einfach dessen Stand zurück.
+@app.post("/api/checksums", status_code=202, dependencies=[Depends(require_own_origin)])
+async def post_checksums(background_tasks: BackgroundTasks, session: Session = Depends(current_session)) -> dict:
+    if claim_backfill():
+        background_tasks.add_task(backfill_missing_sha256, session)
     return dict(backfill_progress)
 
 

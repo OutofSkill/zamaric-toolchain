@@ -184,39 +184,23 @@ h3 {
   justify-self: end;
 }
 
-.checksum-progress {
-  display: flex;
-  align-items: center;
+.checksum-card {
+  display: grid;
   gap: 12px;
-  max-width: 1000px;
-  margin: 0 auto;
-  padding: 0 24px 10px;
-  color: var(--text-muted);
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
+  justify-items: start;
 }
 
-.checksum-progress[hidden] {
-  display: none;
-}
-
-.checksum-progress .progress {
-  flex: 1;
-  min-width: 80px;
-  height: 4px;
+.checksum-card > * {
   margin: 0;
 }
 
-@media (max-width: 720px) {
-  .checksum-progress {
-    flex-wrap: wrap;
-    gap: 6px 12px;
-    padding: 0 16px 10px;
-  }
+.checksum-card .progress {
+  justify-self: stretch;
+  margin: 0;
+}
 
-  .checksum-progress .progress {
-    flex-basis: 100%;
-  }
+.checksum-card .hint {
+  font-variant-numeric: tabular-nums;
 }
 
 .shell {

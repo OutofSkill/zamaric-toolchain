@@ -2,9 +2,10 @@
 
 Dateien, die vor der Migration song_update hochgeladen wurden, haben noch
 keine Prüfsumme. Die wird hier einmal nachgetragen: Datei aus dem Bucket
-laden, hashen, über set_file_sha256 eintragen. Nach jedem Login macht
-backfill_missing_sha256 das im Hintergrund für alle Zeilen ohne Prüfsumme,
-also auch für eine, deren Prüfsumme in der DB versehentlich gelöscht wurde.
+laden, hashen, über set_file_sha256 eintragen. Auf Knopfdruck auf der
+Website (POST /api/checksums) macht backfill_missing_sha256 das im
+Hintergrund für alle Zeilen ohne Prüfsumme, also auch für eine, deren
+Prüfsumme in der DB versehentlich gelöscht wurde.
 """
 
 import hashlib
@@ -33,8 +34,8 @@ backfill_progress = {"running": False, "total": 0, "done": 0, "failed": 0}
 def claim_backfill() -> bool:
     """Reserviert den nächsten Durchgang. False, wenn schon einer läuft.
 
-    Läuft vor der Antwort auf den Login, damit die Website beim ersten
-    Abfragen schon sieht, dass etwas läuft.
+    Läuft vor der Antwort auf POST /api/checksums, damit die Website beim
+    ersten Abfragen schon sieht, dass etwas läuft.
     """
     if backfill_progress["running"]:
         return False
@@ -123,11 +124,11 @@ def missing_sha256(query):
 
 
 async def backfill_missing_sha256(session: Session) -> None:
-    """Trägt nach dem Login alle fehlenden Prüfsummen nach.
+    """Trägt alle fehlenden Prüfsummen nach.
 
     Vorher muss claim_backfill() True geliefert haben. Läuft nach der Antwort
     an den Browser, Datei für Datei, damit nie mehr als eine im Speicher liegt.
-    Fehlt eine Datei im Bucket, wird sie übersprungen und beim nächsten Login
+    Fehlt eine Datei im Bucket, wird sie übersprungen und beim nächsten Durchgang
     wieder versucht. Endet, wenn die Session vorbei ist. Fehler landen nur im Log.
     """
     progress = backfill_progress

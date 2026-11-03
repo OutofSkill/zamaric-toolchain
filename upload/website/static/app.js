@@ -107,7 +107,6 @@ const state = {
 const inspectionCache = new Map();
 const sessionCheckIntervalMs = 60 * 1000;
 const checksumPollMs = 1500;
-const checksumDoneVisibleMs = 5000;
 let sharedAudioContext = null;
 let signedIn = false;
 let loginDialog = null;
@@ -413,54 +412,72 @@ async function checkSession() {
 
 let checksumTimer = null;
 
-async function pollChecksums() {
-  clearTimeout(checksumTimer);
-  if (demo || !signedIn) return;
-  let progress;
-  try {
-    const response = await request("/api/checksums");
-    if (!response.ok) return;
-    progress = await response.json();
-  } catch {
-    return;
-  }
+function applyChecksumProgress(progress) {
   const wasRunning = state.checksums?.running ?? false;
   state.checksums = { ...progress, finished: !progress.running && (wasRunning || state.checksums?.finished) };
-  updateChecksumProgress();
-  if (progress.running) {
-    checksumTimer = setTimeout(pollChecksums, checksumPollMs);
-  } else if (wasRunning) {
-    checksumTimer = setTimeout(() => {
-      state.checksums = null;
-      updateChecksumProgress();
-    }, checksumDoneVisibleMs);
+  document.querySelector(".checksum-card")?.replaceWith(checksumCard());
+  clearTimeout(checksumTimer);
+  if (progress.running) checksumTimer = setTimeout(pollChecksums, checksumPollMs);
+}
+
+async function pollChecksums() {
+  if (demo || !signedIn) return;
+  try {
+    const response = await request("/api/checksums");
+    if (response.ok) applyChecksumProgress(await response.json());
+  } catch {
+    clearTimeout(checksumTimer);
   }
 }
 
-function checksumProgress() {
-  const progress = state.checksums;
-  const visible = progress && progress.total > 0 && (progress.running || progress.finished);
-  if (!visible) return h("div", { class: "checksum-progress", hidden: true });
-  const percent = progress.running ? Math.round((progress.done / progress.total) * 100) : 100;
-  const text = progress.running
-    ? `Prüfsummen werden nachgetragen: ${progress.done} von ${progress.total}`
-    : progress.failed
-      ? `Prüfsummen nachgetragen, ${progress.failed} fehlgeschlagen (siehe Log)`
-      : "Prüfsummen nachgetragen";
-  return h(
-    "div",
-    { class: "checksum-progress", role: "status" },
-    h("span", { class: "checksum-label" }, text),
-    h(
-      "div",
-      { class: "progress", role: "progressbar", "aria-label": "Prüfsummen", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(percent) },
-      h("div", { class: "progress-bar", style: `width: ${percent}%` }),
-    ),
-  );
+async function startChecksums() {
+  state.checksums = { running: true, total: 0, done: 0, failed: 0, finished: false, error: null };
+  document.querySelector(".checksum-card")?.replaceWith(checksumCard());
+  try {
+    const response = await request("/api/checksums", { method: "POST" });
+    if (!response.ok) throw new Error(String(response.status));
+    applyChecksumProgress(await response.json());
+  } catch (error) {
+    if (error instanceof SessionExpired) return;
+    state.checksums = { running: false, error: "Konnte nicht gestartet werden." };
+    document.querySelector(".checksum-card")?.replaceWith(checksumCard());
+  }
 }
 
-function updateChecksumProgress() {
-  document.querySelector(".checksum-progress")?.replaceWith(checksumProgress());
+function checksumStatus(progress) {
+  if (!progress) return null;
+  if (progress.error) return h("p", { class: "form-error", role: "alert" }, progress.error);
+  if (progress.running) {
+    const percent = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
+    return [
+      h(
+        "div",
+        { class: "progress", role: "progressbar", "aria-label": "Prüfsummen", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(percent) },
+        h("div", { class: "progress-bar", style: `width: ${percent}%` }),
+      ),
+      h("p", { class: "hint", role: "status" }, progress.total ? `${progress.done} von ${progress.total} Dateien` : "Suche Dateien ohne Prüfsumme …"),
+    ];
+  }
+  if (!progress.finished) return null;
+  const added = progress.done - progress.failed;
+  const text =
+    progress.total === 0
+      ? "Alle Dateien haben schon eine Prüfsumme."
+      : `${added} ${added === 1 ? "Prüfsumme" : "Prüfsummen"} nachgetragen${progress.failed ? `, ${progress.failed} fehlgeschlagen (siehe Log)` : ""}.`;
+  return h("p", { class: "hint", role: "status" }, text);
+}
+
+function checksumCard() {
+  if (demo) return null;
+  const running = state.checksums?.running ?? false;
+  return h(
+    "section",
+    { class: "card checksum-card" },
+    h("div", { class: "section-head" }, h("h2", {}, "Prüfsummen")),
+    h("p", { class: "muted" }, "Trägt fehlende Prüfsummen in der DB nach, z. B. bei alten Uploads oder wenn eine gelöscht wurde. Lädt dafür die betroffenen Dateien einmal herunter."),
+    checksumStatus(state.checksums),
+    h("button", { class: "button small", type: "button", disabled: running, onclick: startChecksums }, running ? "Läuft …" : "Prüfsummen nachtragen"),
+  );
 }
 
 function referenceRefreshAllowed() {
@@ -1288,7 +1305,6 @@ function header(withSteps = false) {
       withSteps ? stepper() : null,
       h("div", { class: "topbar-end" }, demo ? null : h("button", { class: "link", type: "button", onclick: logout }, "Abmelden")),
     ),
-    checksumProgress(),
   );
 }
 
@@ -1891,6 +1907,7 @@ function renderFolderStep() {
     state.folderError ? h("p", { class: "form-error", role: "alert" }, state.folderError) : null,
     pageNavigation({ next: nextButton() }),
     recentUploadsCard(),
+    checksumCard(),
   ];
 }
 
