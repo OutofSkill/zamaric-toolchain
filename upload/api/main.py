@@ -18,7 +18,7 @@ from config import settings
 from errors import ApiError
 from reference import load_reference
 from sessions import COOKIE_NAME, Session, current_session, existing_session, fresh_client
-from songs import load_song
+from songs import backfill_missing_sha256, backfill_progress, claim_backfill, load_song
 from upload import remove_unused_files, update_song, upload_song
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
@@ -83,8 +83,10 @@ class LoginRequest(BaseModel):
 
 
 @app.post("/api/login", status_code=204, dependencies=[Depends(require_own_origin)])
-async def post_login(body: LoginRequest, response: Response) -> None:
+async def post_login(body: LoginRequest, response: Response, background_tasks: BackgroundTasks) -> None:
     session_id = await sessions.login(body.password)
+    if claim_backfill():
+        background_tasks.add_task(backfill_missing_sha256, sessions.sessions[session_id])
     response.set_cookie(
         COOKIE_NAME,
         session_id,
@@ -106,6 +108,12 @@ async def post_logout(response: Response, session: Session = Depends(current_ses
 @app.get("/api/session", status_code=204, dependencies=[Depends(existing_session)])
 async def get_session_status() -> None:
     return None
+
+
+# Verlängert die Session nicht, die Website fragt das alle paar Sekunden ab.
+@app.get("/api/checksums", dependencies=[Depends(existing_session)])
+async def get_checksum_progress() -> dict:
+    return dict(backfill_progress)
 
 
 @app.get("/api/reference")

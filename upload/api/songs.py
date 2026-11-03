@@ -2,7 +2,9 @@
 
 Dateien, die vor der Migration song_update hochgeladen wurden, haben noch
 keine Prüfsumme. Die wird hier einmal nachgetragen: Datei aus dem Bucket
-laden, hashen, über set_file_sha256 eintragen.
+laden, hashen, über set_file_sha256 eintragen. Nach jedem Login macht
+backfill_missing_sha256 das im Hintergrund für alle Zeilen ohne Prüfsumme,
+also auch für eine, deren Prüfsumme in der DB versehentlich gelöscht wurde.
 """
 
 import hashlib
@@ -11,13 +13,33 @@ import logging
 import httpx
 from supabase import AsyncClient, PostgrestAPIError, StorageException
 
+import sessions
 from errors import ApiError
 from reference import select_all
+from sessions import Session, fresh_client
 
 logger = logging.getLogger("upload")
 
 AUDIO_BUCKET = "audio"
 SHEET_MUSIC_BUCKET = "sheet_music"
+
+FILE_TABLES = (("count_in", AUDIO_BUCKET), ("playback", AUDIO_BUCKET), ("sheet_music", SHEET_MUSIC_BUCKET))
+
+# Stand des Nachtragens für GET /api/checksums. Es läuft immer nur ein
+# Durchgang gleichzeitig, auch bei mehreren Logins kurz hintereinander.
+backfill_progress = {"running": False, "total": 0, "done": 0, "failed": 0}
+
+
+def claim_backfill() -> bool:
+    """Reserviert den nächsten Durchgang. False, wenn schon einer läuft.
+
+    Läuft vor der Antwort auf den Login, damit die Website beim ersten
+    Abfragen schon sieht, dass etwas läuft.
+    """
+    if backfill_progress["running"]:
+        return False
+    backfill_progress.update(running=True, total=0, done=0, failed=0)
+    return True
 
 
 def visible_rows_of(song_id: int):
@@ -93,6 +115,51 @@ async def pending_release_at(client: AsyncClient, song_id: int) -> str | None:
         if rows:
             return rows[0]["release_at"]
     return None
+
+
+def missing_sha256(query):
+    """Filter für Zeilen mit Datei, aber ohne Prüfsumme."""
+    return query.is_("sha256", "null").not_.is_("path", "null")
+
+
+async def backfill_missing_sha256(session: Session) -> None:
+    """Trägt nach dem Login alle fehlenden Prüfsummen nach.
+
+    Vorher muss claim_backfill() True geliefert haben. Läuft nach der Antwort
+    an den Browser, Datei für Datei, damit nie mehr als eine im Speicher liegt.
+    Fehlt eine Datei im Bucket, wird sie übersprungen und beim nächsten Login
+    wieder versucht. Endet, wenn die Session vorbei ist. Fehler landen nur im Log.
+    """
+    progress = backfill_progress
+    try:
+        work = []
+        for table, bucket in FILE_TABLES:
+            rows = await select_all(await fresh_client(session), table, "id, path, sha256", ["id"], missing_sha256)
+            work.extend((table, bucket, row) for row in rows)
+        progress["total"] = len(work)
+        for table, bucket, row in work:
+            if session.session_id not in sessions.sessions:
+                logger.info("Prüfsummen nachtragen abgebrochen, Session vorbei")
+                return
+            try:
+                await backfill_sha256(await fresh_client(session), table, bucket, row)
+            except (ApiError, PostgrestAPIError, httpx.HTTPError) as error:
+                if isinstance(error, ApiError) and error.code == "unauthorized":
+                    raise
+                progress["failed"] += 1
+                reason = error.code if isinstance(error, ApiError) else type(error).__name__
+                logger.warning("Prüfsumme für %s %s nicht nachgetragen (%s)", table, row["id"], reason)
+            progress["done"] += 1
+    except Exception as error:
+        logger.warning("Prüfsummen nachtragen fehlgeschlagen (%s)", type(error).__name__)
+    finally:
+        progress["running"] = False
+        if progress["done"]:
+            logger.info(
+                "Prüfsummen nachgetragen: %d, fehlgeschlagen: %d",
+                progress["done"] - progress["failed"],
+                progress["failed"],
+            )
 
 
 async def backfill_sha256(client: AsyncClient, table: str, bucket: str, row: dict) -> None:

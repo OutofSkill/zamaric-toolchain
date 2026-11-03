@@ -74,6 +74,7 @@ const loginErrors = {
 const state = {
   step: 0,
   reference: null,
+  checksums: null,
   categoryId: null,
   songName: null,
   files: [],
@@ -105,6 +106,8 @@ const state = {
 
 const inspectionCache = new Map();
 const sessionCheckIntervalMs = 60 * 1000;
+const checksumPollMs = 1500;
+const checksumDoneVisibleMs = 5000;
 let sharedAudioContext = null;
 let signedIn = false;
 let loginDialog = null;
@@ -406,6 +409,58 @@ async function request(path, options = {}) {
 async function checkSession() {
   if (demo || !signedIn) return;
   await request("/api/session").catch(() => null);
+}
+
+let checksumTimer = null;
+
+async function pollChecksums() {
+  clearTimeout(checksumTimer);
+  if (demo || !signedIn) return;
+  let progress;
+  try {
+    const response = await request("/api/checksums");
+    if (!response.ok) return;
+    progress = await response.json();
+  } catch {
+    return;
+  }
+  const wasRunning = state.checksums?.running ?? false;
+  state.checksums = { ...progress, finished: !progress.running && (wasRunning || state.checksums?.finished) };
+  updateChecksumProgress();
+  if (progress.running) {
+    checksumTimer = setTimeout(pollChecksums, checksumPollMs);
+  } else if (wasRunning) {
+    checksumTimer = setTimeout(() => {
+      state.checksums = null;
+      updateChecksumProgress();
+    }, checksumDoneVisibleMs);
+  }
+}
+
+function checksumProgress() {
+  const progress = state.checksums;
+  const visible = progress && progress.total > 0 && (progress.running || progress.finished);
+  if (!visible) return h("div", { class: "checksum-progress", hidden: true });
+  const percent = progress.running ? Math.round((progress.done / progress.total) * 100) : 100;
+  const text = progress.running
+    ? `Prüfsummen werden nachgetragen: ${progress.done} von ${progress.total}`
+    : progress.failed
+      ? `Prüfsummen nachgetragen, ${progress.failed} fehlgeschlagen (siehe Log)`
+      : "Prüfsummen nachgetragen";
+  return h(
+    "div",
+    { class: "checksum-progress", role: "status" },
+    h("span", { class: "checksum-label" }, text),
+    h(
+      "div",
+      { class: "progress", role: "progressbar", "aria-label": "Prüfsummen", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(percent) },
+      h("div", { class: "progress-bar", style: `width: ${percent}%` }),
+    ),
+  );
+}
+
+function updateChecksumProgress() {
+  document.querySelector(".checksum-progress")?.replaceWith(checksumProgress());
 }
 
 function referenceRefreshAllowed() {
@@ -1233,6 +1288,7 @@ function header(withSteps = false) {
       withSteps ? stepper() : null,
       h("div", { class: "topbar-end" }, demo ? null : h("button", { class: "link", type: "button", onclick: logout }, "Abmelden")),
     ),
+    checksumProgress(),
   );
 }
 
@@ -3515,6 +3571,7 @@ async function start() {
   try {
     state.reference = await loadReference();
     signedIn = true;
+    pollChecksums();
     if (state.result && state.upload == null) {
       await runCheck();
     } else {
