@@ -1,0 +1,83 @@
+# Entwicklerseite auf dem Pi. Starten im Ordner Backend/dev:
+#   docker compose up -d --build
+# Die Werte kommen aus der .env im selben Ordner (Vorlage: .env.example).
+# Details: README → Entwicklerseite → Starten.
+
+services:
+  # Verbindet Container 1 mit dem NetBird-Netz. Container 1 teilt sich das
+  # Netzwerk mit diesem Container und ist deshalb nur über NetBird erreichbar.
+  # Auf dem Pi selbst wird kein Port veröffentlicht.
+  netbird:
+    image: netbirdio/netbird:0.82.0
+    hostname: zamaric-dev
+    environment:
+      # Nur für die erste Anmeldung nötig, danach in der .env leeren
+      NB_SETUP_KEY: ${NB_SETUP_KEY:-}
+      NB_HOSTNAME: zamaric-dev
+    # Laut NetBird-Doku nötig für WireGuard (eBPF, Raw Sockets)
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+      - SYS_RESOURCE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      # Anmeldung und Schlüssel des Geräts, getrennt vom Upload-Tool. Ohne
+      # Volume wäre der Container nach jedem Neustart ein neues Gerät.
+      - netbird-state:/var/lib/netbird
+    restart: unless-stopped
+
+  # Container 1: nginx mit der Website, leitet /api/ an Container 2 weiter
+  website:
+    build: ./website
+    network_mode: service:netbird
+    depends_on:
+      - netbird
+      - api
+    # Prozesse im Container können sich keine zusätzlichen Rechte verschaffen
+    security_opt:
+      - no-new-privileges:true
+    # Alle Linux-Sonderrechte entziehen, bis auf die, die nginx zum Start
+    # braucht: Port 80 öffnen und danach zum Nutzer "nginx" wechseln
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - SETUID
+      - SETGID
+      - CHOWN
+    restart: unless-stopped
+
+  # Container 2: Python, nur im internen Docker-Netz erreichbar
+  api:
+    # Login, Sessions und Fehlerbehandlung liegen in Backend/shared und werden
+    # beim Bauen dazukopiert (COPY --from=shared im Dockerfile)
+    build:
+      context: ./api
+      additional_contexts:
+        shared: ../shared
+    # Nur die Variablen, die Container 2 braucht. NB_SETUP_KEY bekommt er nicht.
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
+      SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-120}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    volumes:
+      # Nur das .git des Repos, schreibgeschützt. Der Arbeitsbaum mit den
+      # .env-Dateien und den Song-Ordnern bleibt draußen.
+      - ${REPO_PATH:?REPO_PATH in der .env setzen}/.git:/repo.git:ro
+      # Board als SQLite-Datei und seine täglichen Sicherungen (backups/).
+      # Bleibt bei Neustart und Neubau erhalten, weg nur mit "docker compose down -v".
+      - board-data:/data
+    # Läuft als normaler Nutzer auf Port 8000 und braucht keine Sonderrechte
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+volumes:
+  netbird-state:
+  board-data:

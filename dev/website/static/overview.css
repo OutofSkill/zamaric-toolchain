@@ -1,0 +1,790 @@
+/* Bereich Übersicht. Nutzt nur die Tokens aus style.css und die Diagrammfarben
+   aus views.css, Präfix ov-. Ab 1200 × 600 px füllt die Seite genau den
+   Bildschirm und scrollt nicht, Schrift und Diagramme wachsen dann mit dem
+   Fenster. Darunter laufen die Kacheln in 2 bzw. 1 Spalte mit gleich hohen Zeilen. */
+
+.ov-page {
+  --ov-gap: 14px;
+  max-width: none;
+  gap: var(--ov-gap);
+  padding-top: 20px;
+  padding-bottom: 24px;
+}
+
+.ov-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Ohne Seitentitel: „Nicht aktuell“ liegt als kleine Marke auf der oberen
+   Kante der Ampelleiste, im Rand über ihr. So verschiebt sie nichts.
+   --warn allein hat auf --paper nur 3,9:1, mit Tinte gemischt 5,2:1 (dunkel 11:1) */
+.ov-page {
+  position: relative;
+}
+
+.ov-notice {
+  position: absolute;
+  z-index: 1;
+  top: calc(20px - 0.75em);
+  right: calc(var(--gutter) + 14px);
+  max-width: calc(100% - 2 * var(--gutter) - 28px);
+  margin: 0;
+  padding: 1px 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: color-mix(in srgb, var(--warn) 80%, var(--ink));
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ov-notice:empty {
+  display: none;
+}
+
+.ov-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ov-gap);
+  min-height: 0;
+}
+
+/* ---------- Statusleiste ---------- */
+
+.ov-status {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.ov-status-item + .ov-status-item {
+  border-left: 1px solid var(--line);
+}
+
+.ov-status-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 100%;
+  padding: 12px 16px;
+  color: inherit;
+  text-decoration: none;
+  transition: background-color 120ms ease;
+}
+
+.ov-status-link:hover {
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+
+.ov-status-link:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: -2px;
+}
+
+.ov-light {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--sunken);
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.ov-ok .ov-light {
+  background: var(--ok-soft);
+  color: var(--ok);
+  box-shadow: inset 0 0 0 1.5px var(--ok);
+}
+
+.ov-warn .ov-light {
+  background: var(--warn-soft);
+  color: var(--warn);
+  box-shadow: inset 0 0 0 1.5px var(--warn);
+}
+
+.ov-error .ov-light {
+  background: var(--error);
+  color: var(--surface);
+}
+
+.ov-muted .ov-light {
+  box-shadow: inset 0 0 0 1.5px var(--line);
+}
+
+.ov-status-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ov-status-label {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.ov-status-value {
+  font-size: 1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ov-status-detail {
+  font-size: 0.78rem;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- Raster der Kacheln ---------- */
+
+.ov-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(230px, 1fr);
+  grid-template-areas:
+    "content storage"
+    "releases repo"
+    "messages messages";
+  gap: var(--ov-gap);
+}
+
+.ov-tile-content { grid-area: content; }
+.ov-tile-storage { grid-area: storage; }
+.ov-tile-releases { grid-area: releases; }
+.ov-tile-repo { grid-area: repo; }
+.ov-tile-notifications { grid-area: messages; }
+
+/* Alles in der Kachel rechnet in em, damit es mit --ov-text mitwächst */
+.ov-tile {
+  --ov-text: 15px;
+  gap: 0.7em;
+  min-height: 0;
+  padding: 0.95em 1.2em 1.05em;
+  font-size: var(--ov-text);
+  transition: border-color 120ms ease;
+}
+
+/* Nur Kacheln mit eigenem Bereich sind anklickbar */
+.ov-tile-linked {
+  cursor: pointer;
+}
+
+.ov-tile-linked:hover {
+  border-color: color-mix(in srgb, var(--ink) 22%, var(--line));
+}
+
+.ov-tile-linked:focus-within {
+  border-color: var(--brass);
+}
+
+.ov-tile-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5em 0.8em;
+  min-width: 0;
+}
+
+.ov-tile-head h2 {
+  margin: 0;
+  font-size: 1em;
+  font-weight: 700;
+}
+
+.ov-tile-link {
+  color: inherit;
+  text-decoration: none;
+  border-radius: 4px;
+}
+
+.ov-tile-link:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 3px;
+}
+
+.ov-tile-meta {
+  font-size: 0.84em;
+  white-space: nowrap;
+}
+
+.ov-tile-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.7em;
+  min-height: 0;
+}
+
+.ov-tile-body p {
+  margin: 0;
+}
+
+.ov-error {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  color: var(--ink);
+}
+
+.ov-quiet {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.ov-big {
+  font-size: 2em;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+
+.ov-symbol {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 1.25em;
+  height: 1.25em;
+  border-radius: 999px;
+  background: var(--sunken);
+  color: var(--muted);
+  font-size: 0.9em;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.ov-symbol > span[aria-hidden] {
+  font-size: 0.72em;
+}
+
+.ov-symbol.ov-ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.ov-symbol.ov-error {
+  background: var(--error);
+  color: var(--surface);
+}
+
+.ov-symbol.ov-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+/* ---------- Inhalt: liegende Balken ---------- */
+
+.ov-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1em;
+  min-height: 0;
+}
+
+.ov-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85em;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ov-bar-row {
+  display: grid;
+  grid-template-columns: 5.6em minmax(0, 1fr) 3.6em;
+  align-items: center;
+  gap: 0.7em;
+}
+
+.ov-bar-label {
+  font-size: 0.92em;
+  font-weight: 600;
+}
+
+.ov-bar-track {
+  display: flex;
+  gap: 2px;
+  height: 0.75em;
+}
+
+.ov-bar {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: 0 4px 4px 0;
+  background: var(--viz-mark, var(--brass));
+}
+
+.ov-bar:has(+ .ov-bar) {
+  border-radius: 0;
+}
+
+.ov-bar-value {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.ov-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 0.82em;
+}
+
+.ov-swatch {
+  display: inline-block;
+  flex: none;
+  width: 0.7em;
+  height: 0.7em;
+  border-radius: 3px;
+  background: var(--viz-mark, var(--brass));
+}
+
+/* Wartend gehört zum Song-Balken: dasselbe Messing, aber schraffiert mit
+   vollem Rand. Rand und Streifen haben gegen die Fläche mindestens 4:1. */
+.ov-bar-pending,
+.ov-swatch-pending,
+.ov-week-current .ov-week-bar {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--viz-mark, var(--brass)) 0 2px,
+    transparent 2px 5px
+  );
+  box-shadow: inset 0 0 0 1.5px var(--viz-mark, var(--brass));
+}
+
+.ov-legend .ov-swatch-pending {
+  margin-left: 0.6em;
+}
+
+/* ---------- Speicher: Ring ---------- */
+
+.ov-storage {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 1.6em;
+  min-height: 0;
+}
+
+.ov-ring {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 9.5em;
+  aspect-ratio: 1;
+}
+
+.ov-ring svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.ov-ring-track,
+.ov-ring-part {
+  fill: none;
+  stroke-width: 12;
+}
+
+.ov-ring-track {
+  stroke: var(--sunken);
+}
+
+.ov-ring-total {
+  position: absolute;
+  font-size: 1.25em;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ov-slot-1 {
+  stroke: var(--viz-1);
+  background: var(--viz-1);
+}
+
+.ov-slot-2 {
+  stroke: var(--viz-2);
+  background: var(--viz-2);
+}
+
+.ov-storage-list {
+  display: flex;
+  flex: 0 1 13em;
+  flex-direction: column;
+  gap: 0.75em;
+  min-width: 9em;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ov-storage-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0 0.7em;
+}
+
+.ov-storage-name {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  font-weight: 600;
+}
+
+.ov-storage-size {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.ov-storage-files {
+  grid-column: 1 / -1;
+  padding-left: 1.2em;
+  font-size: 0.84em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Freigabe ---------- */
+
+.ov-release {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.2em;
+  min-width: 0;
+}
+
+.ov-release .muted {
+  font-size: 0.92em;
+}
+
+.ov-release .ov-release-song {
+  margin-top: 0.55em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ov-release-kind {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3em 0.55em;
+}
+
+.ov-release-kind .chip {
+  font-size: 0.84em;
+}
+
+/* ---------- Repo ---------- */
+
+.ov-repo {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.7em;
+  min-height: 0;
+}
+
+.ov-repo-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15em;
+  min-width: 0;
+}
+
+.ov-commit {
+  display: flex;
+  align-items: center;
+  gap: 0.55em;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.ov-commit .chip {
+  flex: none;
+  font-size: 0.84em;
+}
+
+.ov-commit-text {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ov-commit-meta {
+  font-size: 0.86em;
+}
+
+.ov-repo .ov-week-compare {
+  margin-top: 0.4em;
+}
+
+.ov-week-compare .ov-big {
+  font-size: 1.6em;
+}
+
+.ov-weeks {
+  display: flex;
+  flex: 1;
+  align-items: flex-end;
+  gap: 0.3em;
+  min-height: 3em;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--muted) 50%, transparent);
+}
+
+.ov-week {
+  display: flex;
+  flex: 1;
+  align-items: flex-end;
+  justify-content: center;
+  height: 100%;
+  border-radius: 4px 4px 0 0;
+}
+
+.ov-week:hover {
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+}
+
+.ov-week-bar {
+  display: block;
+  width: min(100%, 1.9em);
+  min-height: 2px;
+  border-radius: 4px 4px 0 0;
+  background: var(--viz-mark, var(--brass));
+}
+
+
+.ov-repo .ov-weeks-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: -0.4em;
+  font-size: 0.78em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Nachrichten ---------- */
+
+.ov-messages {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ov-message {
+  display: grid;
+  grid-template-columns: auto minmax(0, max-content) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.7em;
+  padding: 0.75em 0;
+  border-top: 1px solid var(--line);
+}
+
+.ov-message:first-child {
+  border-top: 0;
+}
+
+.ov-message-title,
+.ov-message-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ov-message-time {
+  font-size: 0.86em;
+  white-space: nowrap;
+}
+
+/* ---------- Kleinere Bildschirme ---------- */
+
+@media (max-width: 1099px) {
+  .ov-status {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ov-status-item + .ov-status-item {
+    border-left: 0;
+  }
+
+  .ov-status-item:nth-child(even) {
+    border-left: 1px solid var(--line);
+  }
+
+  .ov-status-item:nth-child(n + 3) {
+    border-top: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 639px) {
+  .ov-status,
+  .ov-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ov-grid {
+    grid-auto-rows: auto;
+    grid-template-areas:
+      "content"
+      "storage"
+      "releases"
+      "repo"
+      "messages";
+  }
+
+  .ov-status-item:nth-child(even) {
+    border-left: 0;
+  }
+
+  .ov-status-item + .ov-status-item {
+    border-top: 1px solid var(--line);
+  }
+
+  .ov-message {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .ov-message-text {
+    display: none;
+  }
+
+  .ov-ring {
+    width: 7.5em;
+  }
+
+  .ov-weeks {
+    min-height: 4em;
+  }
+}
+
+/* ---------- Laptop und größer: genau ein Bildschirm, kein Scrollen ---------- */
+
+@media (min-width: 1200px) and (min-height: 600px) {
+  .ov-page {
+    --ov-gap: clamp(14px, 1.6vh, 22px);
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  .ov-body {
+    flex: 1;
+  }
+
+  .ov-status-link {
+    padding: clamp(12px, 1.5vh, 18px) 16px;
+  }
+
+  .ov-grid {
+    flex: 1;
+    min-height: 0;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: auto;
+    grid-template-areas:
+      "content content storage storage releases releases"
+      "repo repo repo messages messages messages";
+  }
+
+  /* Wächst mit Höhe und Breite: 14 px bei 1280 × 720, 18 px bei 1920 × 1080 */
+  .ov-tile {
+    --ov-text: clamp(14px, calc(0.9vh + 0.45vw), 18px);
+    overflow: hidden;
+  }
+
+  .ov-tile-content .ov-bars {
+    gap: clamp(0.85em, 2.6vh, 2em);
+  }
+
+  .ov-bar-track {
+    height: clamp(0.75em, 1.7vh, 1.3em);
+  }
+
+  .ov-ring {
+    width: clamp(7em, 20vh, 13em);
+  }
+
+  .ov-big {
+    font-size: clamp(2em, 4vh, 2.6em);
+  }
+
+  .ov-message {
+    flex: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ov-status-link,
+  .ov-tile {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .ov-light,
+  .ov-symbol {
+    border: 1px solid CanvasText;
+  }
+
+  .ov-bar,
+  .ov-week-bar,
+  .ov-swatch {
+    background: CanvasText;
+    forced-color-adjust: none;
+  }
+
+  .ov-ring-part {
+    stroke: CanvasText;
+  }
+
+  .ov-ring-part.ov-slot-2 {
+    stroke: GrayText;
+  }
+}

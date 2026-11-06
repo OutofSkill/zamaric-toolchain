@@ -184,25 +184,6 @@ h3 {
   justify-self: end;
 }
 
-.checksum-card {
-  display: grid;
-  gap: 12px;
-  justify-items: start;
-}
-
-.checksum-card > * {
-  margin: 0;
-}
-
-.checksum-card .progress {
-  justify-self: stretch;
-  margin: 0;
-}
-
-.checksum-card .hint {
-  font-variant-numeric: tabular-nums;
-}
-
 .shell {
   display: grid;
   gap: 16px;

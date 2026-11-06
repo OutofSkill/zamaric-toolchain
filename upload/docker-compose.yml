@@ -50,7 +50,12 @@ services:
 
   # Container 2: Python, nur im internen Docker-Netz erreichbar
   api:
-    build: ./api
+    # Login, Sessions und Fehlerbehandlung liegen in Backend/shared und werden
+    # beim Bauen dazukopiert (COPY --from=shared im Dockerfile)
+    build:
+      context: ./api
+      additional_contexts:
+        shared: ../shared
     # Nur die Variablen, die Container 2 braucht. NB_SETUP_KEY bekommt er nicht.
     environment:
       SUPABASE_URL: ${SUPABASE_URL}

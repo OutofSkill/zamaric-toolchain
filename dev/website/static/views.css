@@ -1,0 +1,1183 @@
+/* Bereiche Repo, Datenbank, Nachrichten und Server (views.js).
+   Nutzt nur die Token aus style.css. Eigene Klassen mit Präfix:
+   view- (gemeinsam), viz- (Diagramme), repo-, db-, msg-, srv-. */
+
+/* ---------- Diagramm-Farben ----------
+   Einzelne Reihe in Messing, Sprachen in der geprüften 8er-Kategoriepalette
+   (Reihenfolge fest, CVD-geprüft, dunkel eigene Stufen). Dunkles Messing ist
+   für Flächen auf #A8741A → #BB8529 abgedunkelt, damit es im Helligkeitsband
+   bleibt; Text in Messing nutzt weiter --brass. */
+:root {
+  --viz-mark: #A8741A;
+  --viz-mark-wash: rgb(168 116 26 / 0.10);
+  --viz-1: #2a78d6;
+  --viz-2: #eb6834;
+  --viz-3: #1baf7a;
+  --viz-4: #eda100;
+  --viz-5: #e87ba4;
+  --viz-6: #008300;
+  --viz-7: #6250d6;
+  --viz-other: #8A929C;
+  --viz-other-ink: #16191D;
+  --viz-outage: var(--error);
+  --viz-outage-wash: rgb(198 40 40 / 0.10);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --viz-mark: #BB8529;
+    --viz-mark-wash: rgb(187 133 41 / 0.12);
+    --viz-1: #3987e5;
+    --viz-2: #d95926;
+    --viz-3: #199e70;
+    --viz-4: #c98500;
+    --viz-5: #d55181;
+    --viz-6: #008300;
+    --viz-7: #9085e9;
+    --viz-other: #6B737D;
+    --viz-other-ink: #FFFFFF;
+    --viz-outage-wash: rgb(239 83 80 / 0.14);
+  }
+}
+
+/* ---------- Gemeinsam ---------- */
+
+.view-wide {
+  grid-column: 1 / -1;
+}
+
+.view-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.view-pair {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--gap);
+  align-items: stretch;
+}
+
+/* Mit Seitenleiste bleibt bis 1200 px zu wenig Breite für zwei Tabellen nebeneinander */
+@media (max-width: 1199px) {
+  .view-pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.view-empty-title {
+  font-weight: 600;
+}
+
+.view-refreshing {
+  opacity: 0.55;
+  transition: opacity 160ms ease;
+}
+
+.view-chip-symbol {
+  font-weight: 700;
+  line-height: 1;
+}
+
+.view-table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.view-numeric {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.view-tabs {
+  align-self: flex-start;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.view-tab {
+  white-space: nowrap;
+}
+
+/* Kachelreihen: Spaltenzahl teilt die Kachelzahl, damit nie eine Reihe halb leer bleibt.
+   6 Kacheln → 6, 3 oder 2 Spalten; 4 → 4 oder 2; 2 → immer 2. */
+.view-tiles-host {
+  container-type: inline-size;
+}
+
+.view-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--gap);
+  margin: 0;
+}
+
+.view-tiles-6 {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.view-tiles-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@container (max-width: 759px) {
+  .view-tiles-6 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .view-tiles-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container (max-width: 419px) {
+  .view-tiles-6 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.view-tile-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Füllt in gleich hohen Panels die Resthöhe, statt unten Leerraum zu lassen */
+.panel > .view-fill {
+  flex: 1;
+}
+
+.viz-barlist.view-fill {
+  align-content: space-between;
+}
+
+.view-table-scroll.view-fill > .table {
+  height: 100%;
+}
+
+.view-tile {
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.view-tile dt {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.view-tile dd {
+  margin: 4px 0 0;
+  font-size: 1.35rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+/* Zusatz in derselben Zeile wie der Wert, damit alle Kacheln einer Reihe gleich hoch sind */
+.view-tile dd > span {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.view-tile dd small {
+  min-width: 0;
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+.view-tile dd .chip {
+  font-size: 0.9rem;
+}
+
+/* ---------- Diagramme ---------- */
+
+.viz-frame {
+  position: relative;
+  min-width: 0;
+}
+
+.viz-svg {
+  display: block;
+  max-width: 100%;
+  overflow: visible;
+}
+
+.viz-grid {
+  stroke: var(--line);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.viz-baseline {
+  stroke: var(--muted);
+  stroke-opacity: 0.5;
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.viz-axis-label {
+  fill: var(--muted);
+  font-family: var(--font);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.viz-bar {
+  fill: var(--viz-mark);
+}
+
+.viz-band-highlight {
+  fill: var(--ink);
+  fill-opacity: 0.05;
+  pointer-events: none;
+}
+
+.viz-overlay {
+  fill: transparent;
+  cursor: crosshair;
+}
+
+.viz-overlay:focus {
+  outline: none;
+}
+
+.viz-overlay:focus-visible {
+  stroke: var(--brass);
+  stroke-width: 2;
+}
+
+.viz-line {
+  fill: none;
+  stroke: var(--viz-mark);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.viz-line-dot {
+  fill: var(--viz-mark);
+}
+
+.viz-area {
+  fill: var(--viz-mark-wash);
+}
+
+.viz-outage {
+  fill: var(--viz-outage-wash);
+}
+
+.viz-outage-strip {
+  fill: var(--viz-outage);
+}
+
+.viz-crosshair {
+  stroke: var(--muted);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.viz-marker {
+  fill: var(--viz-mark);
+  stroke: var(--surface);
+  stroke-width: 2;
+  pointer-events: none;
+}
+
+.viz-tooltip {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  gap: 2px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-small);
+  background: var(--surface);
+  box-shadow: var(--shadow-lift);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.viz-tooltip[hidden] {
+  display: none;
+}
+
+.viz-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.viz-tooltip-row strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.viz-tooltip-label {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+/* Linien-Schlüssel im Tooltip und in der Legende */
+.viz-key {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--viz-mark);
+}
+
+.viz-key.viz-key-outage {
+  height: 8px;
+  background: var(--viz-outage);
+}
+
+.viz-key.viz-series-1 { background: var(--viz-1); height: 8px; }
+.viz-key.viz-series-2 { background: var(--viz-2); height: 8px; }
+.viz-key.viz-series-3 { background: var(--viz-3); height: 8px; }
+.viz-key.viz-series-4 { background: var(--viz-4); height: 8px; }
+.viz-key.viz-series-5 { background: var(--viz-5); height: 8px; }
+.viz-key.viz-series-6 { background: var(--viz-6); height: 8px; }
+.viz-key.viz-series-7 { background: var(--viz-7); height: 8px; }
+.viz-key.viz-series-other { background: var(--viz-other); height: 8px; }
+
+.viz-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.86rem;
+}
+
+.viz-legend li,
+.viz-legend-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.viz-swatch {
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.viz-swatch-outage { background: var(--viz-outage); }
+
+.viz-series-1 { background: var(--viz-1); }
+.viz-series-2 { background: var(--viz-2); }
+.viz-series-3 { background: var(--viz-3); }
+.viz-series-4 { background: var(--viz-4); }
+.viz-series-5 { background: var(--viz-5); }
+.viz-series-6 { background: var(--viz-6); }
+.viz-series-7 { background: var(--viz-7); }
+.viz-series-other { background: var(--viz-other); }
+
+/* Hoher Segmentbalken: ein Ganzes, 2 px Lücke zwischen den Teilen */
+.viz-segmented {
+  display: flex;
+  gap: 2px;
+  height: 28px;
+}
+
+.viz-segment {
+  display: flex;
+  align-items: center;
+  min-width: 3px;
+  padding-left: 6px;
+  overflow: hidden;
+  border-radius: 4px;
+  outline-offset: 2px;
+}
+
+.viz-segment:hover,
+.viz-segment:focus-visible {
+  filter: brightness(1.08);
+}
+
+.viz-segment-label {
+  color: #FFFFFF;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.viz-segment.viz-series-4 .viz-segment-label {
+  color: #0B0B0B;
+}
+
+.viz-segment.viz-series-other .viz-segment-label {
+  color: var(--viz-other-ink);
+}
+
+/* Abstände zwischen Diagramm, Legende und Tabelle kommen nur vom Panel (10 px) */
+.viz-data-table {
+  margin-top: 0;
+}
+
+.viz-table-toggle {
+  margin-top: 0;
+}
+
+.viz-table-toggle > summary {
+  width: fit-content;
+  color: var(--muted);
+  font-size: 0.86rem;
+  cursor: pointer;
+}
+
+.viz-table-toggle[open] > summary {
+  margin-bottom: 8px;
+}
+
+/* Waagerechte Balkenliste */
+.viz-barlist {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.viz-barlist li {
+  display: grid;
+  grid-template-columns: minmax(0, 11rem) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  font-size: 0.88rem;
+}
+
+/* Pfade brauchen mehr Platz als Namen */
+.viz-barlist-paths li {
+  grid-template-columns: minmax(0, 40%) minmax(0, 1fr);
+}
+
+.viz-barlist-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viz-barlist-label.mono {
+  font-size: 0.8rem;
+  direction: rtl;
+  text-align: left;
+}
+
+.viz-barlist-track {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.viz-barlist-bar {
+  flex: none;
+  height: 8px;
+  max-width: calc(100% - 4.5rem);
+  border-radius: 0 4px 4px 0;
+  background: var(--viz-mark);
+}
+
+.viz-barlist-value {
+  flex: none;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---------- Repo ---------- */
+
+.repo-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  min-width: 0;
+}
+
+.repo-meta {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.repo-timeline,
+.repo-commits {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.repo-day + .repo-day {
+  margin-top: 10px;
+}
+
+.repo-day-title {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Zeitstrahl: senkrechte Linie, Messing-Punkt je Commit */
+.repo-commits {
+  position: relative;
+  margin-left: 5px;
+  border-left: 2px solid var(--line);
+}
+
+.repo-commit {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  padding: 4px 0 4px 18px;
+}
+
+.repo-dot {
+  position: absolute;
+  top: 9px;
+  left: -6px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--brass);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+/* Eine Zeile pro Commit: Betreff links, Hash, Zeit und Umfang rechts */
+.repo-commit-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px 16px;
+  flex: 1;
+  min-width: 0;
+}
+
+.repo-commit-main > .repo-commit-meta {
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
+.repo-commit-main > .repo-commit-body {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 899px) {
+  .repo-commit-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .repo-commit-main > .repo-commit-meta {
+    justify-content: flex-start;
+    white-space: normal;
+  }
+}
+
+.repo-commit-subject {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 8px;
+  margin: 0;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.repo-commit-subject .chip {
+  font-size: 0.74rem;
+}
+
+.repo-scope {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+.repo-type-feat {
+  background: var(--brass-soft);
+  color: var(--ink);
+}
+
+.repo-commit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin: 0;
+  font-size: 0.84rem;
+}
+
+/* Feste Breiten, damit Hash, Uhrzeit und Umfang untereinander bündig stehen */
+.repo-hash {
+  min-width: 7.5ch;
+}
+
+.repo-clock {
+  min-width: 3.2rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.repo-files {
+  min-width: 5.5rem;
+  text-align: right;
+}
+
+.repo-diff {
+  min-width: 7.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 899px) {
+  .repo-files,
+  .repo-diff {
+    min-width: 0;
+    text-align: left;
+  }
+}
+
+.repo-added {
+  color: var(--ok);
+}
+
+.repo-removed {
+  color: var(--error);
+}
+
+.repo-commit-body > summary {
+  width: fit-content;
+  color: var(--muted);
+  font-size: 0.84rem;
+  cursor: pointer;
+}
+
+.repo-commit-body p {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  font-size: 0.9rem;
+}
+
+.repo-more {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* Inhaltsverzeichnis und Text gemeinsam mittig auf Lesebreite, statt rechts eine leere Panelhälfte */
+.repo-readme-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--gap);
+  align-items: start;
+  width: 100%;
+  max-width: calc(220px + var(--gap) + 82ch + 40px);
+  margin-inline: auto;
+}
+
+@media (min-width: 1100px) {
+  .repo-readme-layout {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .repo-readme-toc {
+    position: sticky;
+    top: 16px;
+  }
+}
+
+.repo-readme-toc ol {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.88rem;
+}
+
+.repo-readme-toc a {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.repo-readme-toc a:hover {
+  color: var(--brass);
+  text-decoration: underline;
+}
+
+.repo-readme-panel {
+  min-width: 0;
+}
+
+.repo-readme {
+  overflow-wrap: anywhere;
+}
+
+.repo-readme :is(h1, h2, h3, h4) {
+  scroll-margin-top: 16px;
+}
+
+.repo-readme :is(h1, h2, h3, h4):focus {
+  outline: none;
+}
+
+.repo-readme pre,
+.repo-readme table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.repo-readme-file {
+  color: var(--ink);
+  text-decoration: underline dotted;
+  cursor: help;
+}
+
+.repo-ci-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.repo-ci-hero .chip {
+  font-size: 0.95rem;
+  padding: 4px 12px;
+}
+
+.repo-ci-title {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.repo-ci-job {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.repo-ci-job h3 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+/* Schritte spaltenweise, damit der letzte Lauf nicht die halbe Seite füllt */
+.repo-ci-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
+  gap: 4px 24px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.9rem;
+}
+
+.repo-ci-step {
+  display: grid;
+  grid-template-columns: 1.2rem minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.repo-ci-step-ok .view-chip-symbol { color: var(--ok); }
+.repo-ci-step-error .view-chip-symbol { color: var(--error); }
+.repo-ci-step-warn .view-chip-symbol { color: var(--warn); }
+.repo-ci-step-muted .view-chip-symbol { color: var(--muted); }
+
+.repo-ci-step-error {
+  font-weight: 600;
+}
+
+.repo-setup {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding-left: 1.4rem;
+  line-height: 1.5;
+}
+
+.repo-setup code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+}
+
+/* ---------- Datenbank ---------- */
+
+.db-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin: 0 0 8px;
+  font-size: 0.88rem;
+}
+
+.db-findings {
+  display: grid;
+  gap: 8px;
+}
+
+.db-findings + .db-findings {
+  margin-top: 8px;
+}
+
+/* Eingeklappte Warnungen nebeneinander; eine ungerade letzte über die volle Breite */
+@media (min-width: 900px) {
+  .db-findings-warnings {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+
+  .db-findings-warnings > :last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Feste Spaltenbreiten, damit die Spalten zwischen den Gruppen nicht springen */
+.db-finding-table {
+  table-layout: fixed;
+}
+
+.db-finding-table th:nth-child(1) { width: 24%; }
+.db-finding-table th:nth-child(2) { width: 14%; }
+.db-finding-table th:nth-child(3) { width: 9%; }
+
+/* Schmal: Song, Tabelle und ID in einer Zeile, das Detail darunter */
+@media (max-width: 699px) {
+  .db-finding-table thead {
+    display: none;
+  }
+
+  .db-finding-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 0 10px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .db-finding-table tr:last-child {
+    border-bottom: 0;
+  }
+
+  .db-finding-table td {
+    border-bottom: 0;
+  }
+
+  .db-finding-table td.db-detail {
+    grid-column: 1 / -1;
+    padding-top: 0;
+  }
+}
+
+.db-finding {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-small);
+  background: var(--surface);
+}
+
+.db-finding-error {
+  border-left: 3px solid var(--error);
+}
+
+.db-finding-warning {
+  border-left: 3px solid var(--warn);
+}
+
+.db-finding > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.db-finding-title {
+  font-weight: 600;
+}
+
+.db-finding-text {
+  font-size: 0.86rem;
+}
+
+.db-finding > .view-table-scroll {
+  margin: 0;
+  padding: 0 12px 10px;
+}
+
+.db-detail {
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.db-files {
+  display: grid;
+  gap: 10px;
+}
+
+.db-subhead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Prüfsummen im Kopf der Integrität: Knopf, Fortschritt und Ergebnis in einer Zeile */
+.db-checksums {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 12px;
+}
+
+.db-checksums > p {
+  margin: 0;
+}
+
+.db-checksums .progress {
+  width: 140px;
+}
+
+.db-path {
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.db-notice {
+  margin: 0 0 10px;
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.db-largest {
+  margin-top: 12px;
+}
+
+.db-largest > summary {
+  width: fit-content;
+  color: var(--muted);
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.db-largest[open] > summary {
+  margin-bottom: 8px;
+}
+
+.db-category {
+  display: block;
+  font-size: 0.8rem;
+}
+
+.db-new {
+  margin-left: 6px;
+  background: var(--brass-soft);
+  color: var(--ink);
+}
+
+.db-overdue {
+  margin-left: 6px;
+}
+
+.db-nowrap {
+  white-space: nowrap;
+}
+
+/* Links Freigaben, Speicher und Dateien übereinander, rechts die Cron-Läufe.
+   Beide Spalten sind gleich hoch; views.js wählt die Zahl der Läufe passend. */
+.db-columns {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--gap);
+  align-items: stretch;
+}
+
+@media (min-width: 1200px) {
+  .db-columns {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.db-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  min-width: 0;
+}
+
+.db-stack > .panel:last-child {
+  flex: 1;
+}
+
+.db-cron-message {
+  display: block;
+  margin-top: 4px;
+}
+
+/* ---------- Nachrichten ---------- */
+
+/* Kein eigener Kopf: das Suchfeld sitzt rechts auf Höhe des ersten Tageskopfs */
+.msg-page {
+  position: relative;
+}
+
+.msg-search {
+  position: absolute;
+  top: 20px;
+  right: var(--gutter);
+  width: min(260px, calc(100% - 2 * var(--gutter) - 120px));
+  height: 32px;
+  min-height: 32px;
+  padding-block: 0;
+}
+
+.msg-list > .msg-day:first-child .msg-day-title {
+  display: flex;
+  align-items: flex-end;
+  min-height: 32px;
+  padding-right: min(276px, 60%);
+}
+
+.msg-list {
+  display: grid;
+  gap: var(--gap);
+}
+
+.msg-day-title {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Ein Panel pro Tag, Nachrichten als Zeilen: kein halb leeres Raster bei einer Nachricht */
+.msg-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding-block: 4px;
+  list-style: none;
+}
+
+.msg-item {
+  display: grid;
+  grid-template-columns: 3.2rem minmax(12rem, 16rem) minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 14px;
+  padding-block: 8px;
+}
+
+.msg-item + .msg-item {
+  border-top: 1px solid var(--line);
+}
+
+.msg-time {
+  font-size: 0.84rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.msg-title {
+  margin: 0;
+  font-size: 0.94rem;
+  overflow-wrap: anywhere;
+}
+
+.msg-text {
+  margin: 0;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.msg-delivery:empty {
+  display: none;
+}
+
+/* Schmal: Uhrzeit, Titel und Zustellung oben, Text darunter */
+@media (max-width: 899px) {
+  .msg-item {
+    grid-template-columns: 3.2rem minmax(0, 1fr) auto;
+  }
+
+  .msg-text {
+    grid-column: 2 / -1;
+    grid-row: 2;
+  }
+
+  .msg-delivery {
+    grid-column: 3;
+    grid-row: 1;
+  }
+}
+
+/* ---------- Server ---------- */
+
+.srv-failures {
+  color: var(--error);
+  font-weight: 600;
+}
+
+.srv-outages {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
+  gap: 6px 20px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.srv-outages li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view-refreshing {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .viz-bar,
+  .viz-line-dot,
+  .viz-marker,
+  .viz-series-1,
+  .viz-series-2,
+  .viz-series-3,
+  .viz-series-4,
+  .viz-series-5,
+  .viz-series-6,
+  .viz-series-7,
+  .viz-series-other {
+    forced-color-adjust: none;
+  }
+}

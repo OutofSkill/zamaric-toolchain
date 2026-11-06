@@ -1,5 +1,7 @@
 """POST /api/upload und POST /api/update: Song prüfen, Dateien in die Buckets laden, Zeilen eintragen.
 
+Das Aufräumen im Bucket danach liegt in shared/files.py.
+
 Neue Songs trägt import_song ein, Änderungen an bestehenden update_song. Die
 Schritte entsprechen dem Ablauf in der README (Upload-Tool → POST /api/upload).
 """
@@ -34,9 +36,6 @@ MAX_FIELD_BYTES = 1024 * 1024
 
 AUDIO_BUCKET = "audio"
 SHEET_MUSIC_BUCKET = "sheet_music"
-
-# So viele Dateien löscht ein Aufruf von storage.remove() auf einmal
-REMOVE_BATCH_SIZE = 100
 
 # Fehler von import_song und update_song (raise exception '<code>') → Antwort an den Browser
 DATABASE_ERRORS = {
@@ -285,24 +284,3 @@ async def call_database(session: Session, function: str, payload: dict):
     except httpx.HTTPError as error:
         raise ApiError(502, "database_failed", str(error)) from None
     return response.data
-
-
-async def remove_unused_files(session: Session) -> None:
-    """Löscht Dateien im Bucket, auf die keine Zeile mehr zeigt (unused_files).
-
-    Läuft nach der Antwort an den Browser. Ein Fehler landet nur im Log, beim
-    nächsten Upload wird es erneut versucht.
-    """
-    try:
-        client = await fresh_client(session)
-        rows = (await client.rpc("unused_files").execute()).data or []
-        names_by_bucket: dict[str, list[str]] = {}
-        for row in rows:
-            names_by_bucket.setdefault(row["bucket"], []).append(row["name"])
-        for bucket, names in names_by_bucket.items():
-            for start in range(0, len(names), REMOVE_BATCH_SIZE):
-                await client.storage.from_(bucket).remove(names[start : start + REMOVE_BATCH_SIZE])
-        if rows:
-            logger.info("%d unbenutzte Dateien im Bucket gelöscht", len(rows))
-    except Exception as error:
-        logger.warning("Aufräumen im Bucket fehlgeschlagen (%s)", type(error).__name__)

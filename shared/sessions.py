@@ -10,13 +10,14 @@ import secrets
 import time
 from dataclasses import dataclass
 
+import httpx
 from fastapi import Request
-from supabase import AsyncClient, AsyncClientOptions, AuthApiError, acreate_client
+from supabase import AsyncClient, AsyncClientOptions, AuthApiError, AuthRetryableError, acreate_client
 
 from config import settings
 from errors import ApiError
 
-logger = logging.getLogger("upload")
+logger = logging.getLogger("zamaric")
 
 COOKIE_NAME = "session"
 
@@ -99,6 +100,9 @@ async def login(password: str) -> str:
             login_guard.record_failure()
             raise ApiError(401, "invalid_credentials") from None
         raise
+    except (AuthRetryableError, httpx.HTTPError) as error:
+        # Supabase nicht erreichbar oder 502/503/504: kein falsches Passwort
+        raise ApiError(502, "database_failed", f"Login: {type(error).__name__}") from None
 
     login_guard.record_success()
     session_id = secrets.token_urlsafe(32)
@@ -149,13 +153,16 @@ async def fresh_client(session: Session) -> AsyncClient:
 
     get_session() erneuert den Token, wenn er in den nächsten Sekunden abläuft.
     Lehnt Supabase das ab (z. B. weil der Refresh-Token widerrufen wurde),
-    ist die Session vorbei.
+    ist die Session vorbei. Ist Supabase gerade nicht erreichbar, bleibt die
+    Session bestehen und der Aufruf scheitert mit database_failed.
     """
     try:
         current = await session.client.auth.get_session()
     except AuthApiError as error:
         current = None
         logger.warning("Token-Erneuerung abgelehnt (%s)", error.code)
+    except (AuthRetryableError, httpx.HTTPError) as error:
+        raise ApiError(502, "database_failed", f"Token-Erneuerung: {type(error).__name__}") from None
     if current is None:
         sessions.pop(session.session_id, None)
         raise ApiError(401, "unauthorized", "Token nicht erneuerbar")
