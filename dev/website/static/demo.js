@@ -369,7 +369,7 @@ function integrity() {
       { check_name: "missing_sha256", severity: "warning", table_name: "sheet_music", row_id: 802, song_id: 4, song_name: "Alba", detail: "Trompete 2 in B, Normal" },
       { check_name: "missing_sha256", severity: "warning", table_name: "count_in", row_id: 77, song_id: 4, song_name: "Alba", detail: "Einzähler C" },
       { check_name: "count_in_unused", severity: "warning", table_name: "count_in", row_id: 91, song_id: 18, song_name: "Bolero Brass", detail: "Einzähler H" },
-      { check_name: "song_without_sheet_music", severity: "warning", table_name: "song", row_id: 27, song_id: 27, song_name: "Polka Nr. 3", detail: "Kategorie Konzert" },
+      { check_name: "display_without_effect", severity: "warning", table_name: "playback", row_id: 27, song_id: 27, song_name: "Polka Nr. 3", detail: "Playback Normal" },
       { check_name: "category_empty", severity: "warning", table_name: "category", row_id: 6, song_id: null, song_name: null, detail: "Weihnachten" },
     ],
   };

@@ -36,9 +36,6 @@ const integrityChecks = {
     title: "Song ohne Playback",
     text: "Sichtbar, kein sichtbares Playback.",
   },
-  song_without_sheet_music: {
-    title: "Song ohne Noten",
-  },
   letter_out_of_range: {
     title: "Buchstabe außerhalb des Playbacks",
     text: "Position vor 0:00 oder nach MP3-Ende.",
