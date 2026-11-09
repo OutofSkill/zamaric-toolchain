@@ -275,16 +275,16 @@ function gitStats() {
       { language: "Andere", files: 11, lines: 310 },
     ],
     hot_files: [
-      { path: "zamaric/lib/controller/player_controller.dart", changes: 38 },
+      { path: "lib/controller/player_controller.dart", changes: 38 },
       { path: "README.md", changes: 31 },
-      { path: "zamaric/lib/screens/player_expanded.dart", changes: 17 },
-      { path: "Backend/upload/website/static/app.js", changes: 15 },
-      { path: "zamaric/lib/controller/sheet_music_controller.dart", changes: 12 },
-      { path: "zamaric/lib/services/sync_service.dart", changes: 9 },
-      { path: "zamaric/lib/utils/logger.dart", changes: 8 },
-      { path: "Backend/upload/api/upload.py", changes: 7 },
-      { path: "zamaric/lib/screens/library_screen.dart", changes: 6 },
-      { path: "Backend/supabase/migrations/20261101130000_song_update.sql", changes: 5 },
+      { path: "lib/screens/player_expanded.dart", changes: 17 },
+      { path: "lib/screens/library_screen.dart", changes: 15 },
+      { path: "lib/controller/sheet_music_controller.dart", changes: 12 },
+      { path: "lib/services/sync_service.dart", changes: 9 },
+      { path: "lib/utils/logger.dart", changes: 8 },
+      { path: "lib/screens/alphabet_scrubber.dart", changes: 7 },
+      { path: "lib/services/database_service.dart", changes: 6 },
+      { path: "pubspec.yaml", changes: 5 },
     ],
   };
 }
@@ -307,7 +307,7 @@ Musikapp für Bläserensembles: Noten (PDF) und Playbacks (MP3) mit Buchstaben-N
 
 ## App
 
-Starten mit \`tool/run_logged.sh\`, die Ausgabe landet in \`zamaric/logs/\`.
+Starten mit \`tool/run_logged.sh\`, die Ausgabe landet in \`logs/\`.
 
 | Bereich | Datei |
 |---|---|
@@ -315,13 +315,12 @@ Starten mit \`tool/run_logged.sh\`, die Ausgabe landet in \`zamaric/logs/\`.
 | Noten | \`lib/controller/sheet_music_controller.dart\` |
 
 \`\`\`sh
-cd zamaric
 flutter analyze
 \`\`\`
 
 ## Supabase
 
-> Projekt in Frankfurt. Migrationen liegen in [Backend/supabase/migrations](Backend/supabase/migrations).
+> Projekt in Frankfurt. Migrationen liegen im Repo \`zamaric-database\`, Schalter in [lib/config](lib/config).
 
 Mehr unter [supabase.com](https://supabase.com/docs).
 `;

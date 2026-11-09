@@ -1069,7 +1069,7 @@ function ciView(body, life) {
         { title: "GitHub Actions", wide: true },
         emptyView(
           "Nicht verbunden",
-          h("span", {}, h("code", {}, "GITHUB_TOKEN"), " in Backend/dev/.env setzen (fine-grained, nur zamaric, Actions + Metadata lesen)."),
+          h("span", {}, h("code", {}, "GITHUB_TOKEN"), " in dev/.env setzen (fine-grained, nur zamaric, Actions + Metadata lesen)."),
         ),
       );
     }

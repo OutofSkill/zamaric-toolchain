@@ -1,4 +1,4 @@
-# Upload-Tool auf dem Pi. Starten im Ordner Backend/upload:
+# Upload-Tool auf dem Pi. Starten im Ordner upload:
 #   docker compose up -d --build
 # Die Werte kommen aus der .env im selben Ordner (Vorlage: .env.example).
 # Details: README → Upload-Tool → Starten.
@@ -50,7 +50,7 @@ services:
 
   # Container 2: Python, nur im internen Docker-Netz erreichbar
   api:
-    # Login, Sessions und Fehlerbehandlung liegen in Backend/shared und werden
+    # Login, Sessions und Fehlerbehandlung liegen in shared und werden
     # beim Bauen dazukopiert (COPY --from=shared im Dockerfile)
     build:
       context: ./api

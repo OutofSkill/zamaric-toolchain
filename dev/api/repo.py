@@ -1,8 +1,9 @@
 """GET /api/git/*, /api/readme und /api/ci: Commit-Verlauf, Statistik, README und GitHub-Status.
 
-Das Repo liegt auf dem Pi und wird dort automatisch gepullt. Container 2 bekommt
-nur dessen .git schreibgeschützt eingehängt (settings.git_dir), keinen
-Arbeitsbaum. So sieht er weder .env-Dateien noch Backend/stuecke.
+Gezeigt wird das App-Repo zamaric. Es liegt auf dem Pi und wird dort automatisch
+gepullt. Container 2 bekommt nur dessen .git schreibgeschützt eingehängt
+(settings.git_dir), keinen Arbeitsbaum. So sieht er keine lokalen Dateien wie
+config/test_account.json.
 
 Alle git-Befehle lesen nur und laufen ohne Shell mit fester Argumentliste.
 Ergebnisse werden je HEAD-Hash im Speicher gehalten: Nach dem nächsten Pull

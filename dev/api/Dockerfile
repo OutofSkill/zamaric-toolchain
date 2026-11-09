@@ -11,7 +11,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-# Login, Sessions und Fehlerbehandlung aus Backend/shared (additional_contexts in der Compose-Datei)
+# Login, Sessions und Fehlerbehandlung aus shared (additional_contexts in der Compose-Datei)
 COPY --from=shared *.py ./
 COPY *.py ./
 
