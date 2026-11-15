@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_publishable_key: str
 
+    storage_url: str
+
     # Der einzige Account, mit dem sich das Upload-Tool anmeldet.
     # Im Browser wird nur das Passwort eingegeben.
     admin_email: str

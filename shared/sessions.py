@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import httpx
 from fastapi import Request
-from supabase import AsyncClient, AsyncClientOptions, AuthApiError, AuthRetryableError, acreate_client
+from supabase import AsyncClient, AsyncClientOptions, AuthApiError, AuthError, AuthRetryableError, acreate_client
 
 from config import settings
 from errors import ApiError
@@ -20,10 +20,6 @@ from errors import ApiError
 logger = logging.getLogger("zamaric")
 
 COOKIE_NAME = "session"
-
-# Wie lange ein einzelner Datei-Upload zu Supabase dauern darf, in Sekunden.
-# Der Standard des Pakets (20 s) reicht für große MP3s nicht.
-STORAGE_TIMEOUT_SECONDS = 300
 
 # Nach so vielen falschen Passwörtern ist der Login für LOCK_SECONDS gesperrt.
 MAX_FAILED_LOGINS = 5
@@ -88,7 +84,6 @@ async def login(password: str) -> str:
             auto_refresh_token=False,
             # Tokens nur im Speicher dieses Clients, nie auf der Platte.
             persist_session=False,
-            storage_client_timeout=STORAGE_TIMEOUT_SECONDS,
         ),
     )
     try:
@@ -156,17 +151,25 @@ async def fresh_client(session: Session) -> AsyncClient:
     ist die Session vorbei. Ist Supabase gerade nicht erreichbar, bleibt die
     Session bestehen und der Aufruf scheitert mit database_failed.
     """
-    try:
-        current = await session.client.auth.get_session()
-    except AuthApiError as error:
-        current = None
-        logger.warning("Token-Erneuerung abgelehnt (%s)", error.code)
-    except (AuthRetryableError, httpx.HTTPError) as error:
-        raise ApiError(502, "database_failed", f"Token-Erneuerung: {type(error).__name__}") from None
-    if current is None:
+    if await renewed_auth_session(session.client) is None:
         sessions.pop(session.session_id, None)
         raise ApiError(401, "unauthorized", "Token nicht erneuerbar")
     return session.client
+
+
+async def renewed_auth_session(client: AsyncClient):
+    try:
+        return await client.auth.get_session()
+    except (AuthRetryableError, httpx.HTTPError, ValueError) as error:
+        raise ApiError(502, "database_failed", f"Token-Erneuerung: {type(error).__name__}") from None
+    except AuthApiError as error:
+        if error.status == 429 or error.status >= 500:
+            raise ApiError(502, "database_failed", f"Token-Erneuerung: Status {error.status}") from None
+        logger.warning("Token-Erneuerung abgelehnt (%s)", error.code)
+        return None
+    except AuthError as error:
+        logger.warning("Token-Erneuerung abgelehnt (%s)", type(error).__name__)
+        return None
 
 
 def remove_idle_sessions() -> None:

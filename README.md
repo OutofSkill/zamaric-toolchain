@@ -46,7 +46,7 @@ zamaric-toolchain/
 
 ## Upload-Tool
 
-Über das Upload-Tool lädt der Geschäftspartner Songs nach Supabase. Er wählt einen Song-Ordner, die Website prüft ihn, er bestätigt Warnungen und Zuordnungen, dann wird hochgeladen. Gibt es den Song in der Kategorie schon, aktualisiert derselbe Ablauf ihn (siehe [Song aktualisieren](#song-aktualisieren)). Löschen kann das Tool nichts, außer Dateien im Bucket, auf die keine Zeile mehr zeigt.
+Über das Upload-Tool lädt der Geschäftspartner Songs hoch: die Zeilen nach Supabase, die Dateien über den Storage-Worker nach Cloudflare R2 (siehe README von `zamaric-backend` → „Storage-Worker“). Er wählt einen Song-Ordner, die Website prüft ihn, er bestätigt Warnungen und Zuordnungen, dann wird hochgeladen. Gibt es den Song in der Kategorie schon, aktualisiert derselbe Ablauf ihn (siehe [Song aktualisieren](#song-aktualisieren)). Löschen kann das Tool nichts, außer Dateien im Bucket, auf die keine Zeile mehr zeigt.
 
 ### Aufbau
 
@@ -108,8 +108,9 @@ upload/
 | `sessions.py` | Login, Sessions, Login-Sperre, Token-Erneuerung (`fresh_client`). Liest `config.settings` des jeweiligen Tools |
 | `errors.py` | `ApiError`: Fehler mit festem Code für den Browser |
 | `queries.py` | `select_all`: alle Zeilen einer Tabelle seitenweise |
+| `storage.py` | Zugriff auf R2 über den Storage-Worker (`STORAGE_URL`) mit dem Token der Session: `upload_file` (mit SHA-256), `download_file`, `list_files`, `delete_files`. Worker-Antwort `401` → `unauthorized`, `403` → `forbidden`, sonst `storage_failed` |
 | `checksums.py` | `backfill_sha256`: Prüfsumme einer Datei nachtragen, `missing_sha256`, Bucket je Tabelle |
-| `files.py` | `remove_unused_files`: unbenutzte Dateien über die Storage-API löschen (`unused_files()`), auch als Hintergrund-Variante, die nur loggt |
+| `files.py` | `remove_unused_files`: Dateiliste aus R2, `unused_files(files)` wählt die unbenutzten, der Worker löscht sie und prüft dabei selbst noch einmal. Auch als Hintergrund-Variante, die nur loggt |
 
 ### Konfiguration
 
@@ -119,6 +120,7 @@ Diese Variablen gehören zu Container 2. Container 1 braucht nur seine nginx-Kon
 |---|---|
 | `SUPABASE_URL` | `https://<projekt>.supabase.co` |
 | `SUPABASE_PUBLISHABLE_KEY` | Publishable Key |
+| `STORAGE_URL` | Adresse des Storage-Workers, `https://zamaric-storage.zamaric.workers.dev`. Kein Secret |
 | `ADMIN_EMAIL` | E-Mail des Upload-Accounts. Nur mit ihm meldet sich das Tool an, im Browser wird nur das Passwort eingegeben |
 | `PUBLIC_ORIGIN` | Eigene Adresse der Website, z. B. `http://zamaric-upload.netbird.cloud`. Für die `Origin`-Prüfung. Beginnt sie mit `https://`, bekommt das Cookie zusätzlich `Secure` |
 | `SESSION_IDLE_MINUTES` | Session endet nach so vielen Minuten ohne Anfrage, z. B. `120` |
@@ -344,10 +346,10 @@ Die Website schickt den geprüften Song mit den Angaben des Partners. Container 
 3. `paths` und `files` gleich lang, jeder Pfad im Manifest genau einmal in `paths`, keine zusätzlichen (`422`).
 4. Dateiinhalt prüfen: PDF beginnt mit `%PDF`, MP3 lässt sich mit `mutagen` lesen (`422`).
 5. `duration_ms` jeder MP3 mit `mutagen` neu messen und den Wert aus dem Manifest ersetzen. Danach prüfen, dass kein `letters[].position_ms` hinter der gemessenen Länge liegt (`422`). Von jeder Datei die SHA-256-Prüfsumme rechnen.
-6. Dateien hochladen: MP3 (Playbacks und Einzähler) in den Bucket `audio` als `<uuid>.mp3`, PDF in den Bucket `sheet_music` als `<uuid>.pdf`. Den Content-Type fest auf `audio/mpeg` bzw. `application/pdf` setzen, nie den aus der Anfrage übernehmen. Der `path` aus dem Manifest dient nur der Zuordnung und taucht im Bucket nicht auf.
+6. Dateien über den Storage-Worker hochladen: MP3 (Playbacks und Einzähler) in den Bucket `audio` als `<uuid>.mp3`, PDF in den Bucket `sheet_music` als `<uuid>.pdf`, jeweils mit der Prüfsumme aus Schritt 5. R2 lehnt eine Datei ab, die unterwegs verändert wurde. Den Content-Type setzt der Worker fest auf `audio/mpeg` bzw. `application/pdf`, nie den aus der Anfrage. Der `path` aus dem Manifest dient nur der Zuordnung und taucht im Bucket nicht auf.
 7. `import_song` (siehe README von `zamaric-database` → „`import_song`“) mit dem Manifest aufrufen, `path` jeweils durch den Dateinamen im Bucket ersetzt (`<uuid>.mp3`, ohne Bucket-Namen), dazu `sha256` je Datei. Die zurückgegebene Song-ID schreibt Container 2 nur ins Log. Fehler übersetzt er so: `song_exists` → `409`, `invalid_manifest` → `422`, `forbidden` → `403`, alles andere → `502` mit `database_failed`.
 8. Scheitert Schritt 6 oder 7, bleiben schon hochgeladene Dateien liegen. Sie sind unsichtbar, und das Aufräumen nach dem nächsten Upload löscht sie.
-9. Nach der Antwort ruft Container 2 im Hintergrund `unused_files()` auf und löscht diese Dateien über Storage, höchstens 100 pro Aufruf. Ein Fehler steht nur im Log.
+9. Nach der Antwort holt Container 2 im Hintergrund die Dateiliste aus R2, lässt `unused_files(files)` die unbenutzten wählen und löscht sie über den Worker, höchstens 100 pro Aufruf. Ein Fehler steht nur im Log.
 
 **Antwort:** nur Status, nie Daten aus der DB.
 
@@ -671,6 +673,7 @@ Variablen von Container 2, in `dev/.env` (Vorlage `.env.example`):
 |---|---|
 | `SUPABASE_URL` | `https://<projekt>.supabase.co` |
 | `SUPABASE_PUBLISHABLE_KEY` | Publishable Key |
+| `STORAGE_URL` | Adresse des Storage-Workers, `https://zamaric-storage.zamaric.workers.dev`. Kein Secret |
 | `ADMIN_EMAIL` | E-Mail eines Accounts aus `admin`. Im Browser wird nur das Passwort eingegeben |
 | `PUBLIC_ORIGIN` | `http://zamaric-dev.netbird.cloud`, für die `Origin`-Prüfung und das `Secure`-Flag |
 | `SESSION_IDLE_MINUTES` | Session endet nach so vielen Minuten ohne Anfrage, Standard `120` |
@@ -741,7 +744,7 @@ Alle Punkte des [Upload-Tools](#sicherheit) gelten hier genauso: feste Fehlercod
 - **CSP:** `default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`. Kein `media-src`.
 - **Markdown** (README, Karten) geht nur über DOMPurify ins DOM. `style`, `form`, `input` und `button` sind zusätzlich verboten. Links öffnen in einem neuen Tab mit `rel="noopener noreferrer"`. Bilder bleiben nur als `data:image/…`, alle anderen werden durch ihren Alt-Text ersetzt, damit keine fremden Server angefragt werden. Alles andere setzt die Website nur als Text ein.
 - **GitHub-Token** nur im Header an api.github.com, nie im Log oder in Fehlermeldungen.
-- **Bucket:** Unbenutzte Dateien löscht nur der Knopf in „Unbenutzte Dateien“, über die Storage-API und die bestehende Lösch-Regel. Die SQL-Funktionen lesen `storage.objects` nur.
+- **Bucket:** Unbenutzte Dateien löscht nur der Knopf in „Unbenutzte Dateien“, über den Storage-Worker, der vor dem Löschen selbst `unused_files(files)` fragt. Die übrigen SQL-Funktionen lesen bis zum Umbau der Entwicklerseite noch `storage.objects`.
 
 ### Board (SQLite)
 
@@ -795,7 +798,7 @@ Für alle gilt die Tabelle unter [Upload-Tool → Endpunkte](#endpunkte) (`401`,
 | `POST` | `/api/board/cards/{id}/move` `{ column_id, index }` | `204` | `404`, `422` |
 | `GET` | `/api/integrity` | `{ checked_at, findings: [integrity_report()] }` | `502` |
 | `GET` | `/api/files` | `{ unused: [{ bucket, name }], missing: [missing_files()] }` | `502` |
-| `POST` | `/api/files/cleanup` | `{ removed }` | `502 storage_failed` / `database_failed` |
+| `POST` | `/api/files/cleanup` | `{ removed }` | `401 unauthorized` / `403 forbidden` / `502 storage_failed` / `database_failed` |
 | `GET` | `/api/checksums` | `{ running, total, done, failed }`, verlängert die Session nicht | |
 | `POST` | `/api/checksums` | `202`, wie `GET`. Läuft schon ein Durchgang, kommt dessen Stand | |
 | `GET` | `/api/storage` | `{ buckets: [storage_usage()], largest: [largest_files(20)] }` | `502` |

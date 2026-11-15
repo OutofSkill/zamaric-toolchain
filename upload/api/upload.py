@@ -19,11 +19,12 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 # request.form() liefert Starlettes UploadFile, nicht die Unterklasse von FastAPI
 from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException
-from supabase import PostgrestAPIError, StorageException
+from supabase import PostgrestAPIError
 
 from errors import ApiError
 from manifest import Manifest, UpdateManifest
 from sessions import Session, fresh_client
+from storage import AUDIO_BUCKET, SHEET_MUSIC_BUCKET, upload_file
 
 logger = logging.getLogger("upload")
 
@@ -33,9 +34,6 @@ MAX_FILES = 300
 MAX_FILE_BYTES = 50 * 1024 * 1024
 # Für die Textfelder manifest und paths
 MAX_FIELD_BYTES = 1024 * 1024
-
-AUDIO_BUCKET = "audio"
-SHEET_MUSIC_BUCKET = "sheet_music"
 
 # Fehler von import_song und update_song (raise exception '<code>') → Antwort an den Browser
 DATABASE_ERRORS = {
@@ -116,7 +114,7 @@ def read_form(form, model: type[BaseModel]) -> tuple[BaseModel, dict[str, Upload
 async def import_files(session: Session, manifest: Manifest, files_by_path: dict[str, UploadFile]) -> None:
     durations = measure_files(manifest, files_by_path)
     hashes = {path: file_sha256(file) for path, file in files_by_path.items()}
-    stored_names = await store_files(session, manifest, files_by_path)
+    stored_names = await store_files(session, manifest, files_by_path, hashes)
 
     # Schritt 7: alle Zeilen in einer Transaktion eintragen
     payload = {
@@ -134,7 +132,7 @@ async def import_files(session: Session, manifest: Manifest, files_by_path: dict
 async def update_files(session: Session, manifest: UpdateManifest, files_by_path: dict[str, UploadFile]) -> str:
     durations = measure_files(manifest, files_by_path)
     hashes = {path: file_sha256(file) for path, file in files_by_path.items()}
-    stored_names = await store_files(session, manifest, files_by_path)
+    stored_names = await store_files(session, manifest, files_by_path, hashes)
 
     payload = {
         "song_id": manifest.song_id,
@@ -197,34 +195,31 @@ def file_sha256(file: UploadFile) -> str:
     return digest.hexdigest()
 
 
-async def store_files(session: Session, manifest: Manifest | UpdateManifest, files_by_path: dict[str, UploadFile]) -> dict[str, str]:
+async def store_files(
+    session: Session, manifest: Manifest | UpdateManifest, files_by_path: dict[str, UploadFile], hashes: dict[str, str]
+) -> dict[str, str]:
     """Schritt 6: Dateien hochladen. Im Bucket heißen sie nur <uuid>.mp3 bzw.
     <uuid>.pdf, der Pfad aus dem Ordner des Partners taucht dort nicht auf."""
     stored_names = {}
     for count_in in manifest.count_ins:
-        stored_names[count_in.path] = await store_file(session, AUDIO_BUCKET, files_by_path[count_in.path])
+        stored_names[count_in.path] = await store_file(session, AUDIO_BUCKET, files_by_path[count_in.path], hashes[count_in.path])
     for playback in manifest.playbacks:
         if playback.path is not None:
-            stored_names[playback.path] = await store_file(session, AUDIO_BUCKET, files_by_path[playback.path])
+            stored_names[playback.path] = await store_file(
+                session, AUDIO_BUCKET, files_by_path[playback.path], hashes[playback.path]
+            )
     for sheet in manifest.sheet_music:
-        stored_names[sheet.path] = await store_file(session, SHEET_MUSIC_BUCKET, files_by_path[sheet.path])
+        stored_names[sheet.path] = await store_file(session, SHEET_MUSIC_BUCKET, files_by_path[sheet.path], hashes[sheet.path])
     return stored_names
 
 
-async def store_file(session: Session, bucket: str, file: UploadFile) -> str:
+async def store_file(session: Session, bucket: str, file: UploadFile, sha256: str) -> str:
     """Lädt eine Datei unter einem zufälligen Namen hoch und gibt den Namen zurück."""
-    if bucket == AUDIO_BUCKET:
-        name, content_type = f"{uuid.uuid4()}.mp3", "audio/mpeg"
-    else:
-        name, content_type = f"{uuid.uuid4()}.pdf", "application/pdf"
+    name = f"{uuid.uuid4()}.mp3" if bucket == AUDIO_BUCKET else f"{uuid.uuid4()}.pdf"
 
-    # Den Content-Type immer selbst setzen, nie den aus der Anfrage übernehmen
-    file_options = {"content-type": content_type, "upsert": "false"}
+    # Den Content-Type setzt der Storage-Worker selbst, nie den aus der Anfrage
     client = await fresh_client(session)
-    try:
-        await client.storage.from_(bucket).upload(name, await file.read(), file_options)
-    except (StorageException, httpx.HTTPError) as error:
-        raise ApiError(502, "storage_failed", f"{bucket}/{name}: {error}") from None
+    await upload_file(client, bucket, name, await file.read(), sha256)
     return name
 
 

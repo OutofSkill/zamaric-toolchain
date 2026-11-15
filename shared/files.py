@@ -1,22 +1,19 @@
 """Aufräumen im Bucket: Dateien löschen, auf die keine Zeile mehr zeigt (unused_files).
 
-Gelöscht wird nur über die Storage-API, nie per SQL aus storage.objects.
-Die Policy "Admins loeschen unbenutzte Dateien" lässt ohnehin nur Dateien zu,
-die unused_files() auch meldet.
+Die Dateiliste kommt aus R2 über den Storage-Worker. Gelöscht wird nur über
+den Worker, der vor dem Löschen selbst noch einmal unused_files() fragt.
 """
 
 import logging
 
 import httpx
-from supabase import PostgrestAPIError, StorageException
+from supabase import PostgrestAPIError
 
 from errors import ApiError
 from sessions import Session, fresh_client
+from storage import AUDIO_BUCKET, SHEET_MUSIC_BUCKET, delete_files, list_files
 
 logger = logging.getLogger("zamaric")
-
-# So viele Dateien löscht ein Aufruf von storage.remove() auf einmal
-REMOVE_BATCH_SIZE = 100
 
 
 async def remove_unused_files(session: Session) -> int:
@@ -25,22 +22,20 @@ async def remove_unused_files(session: Session) -> int:
     Ein Fehler kommt als ApiError mit festem Code zurück.
     """
     client = await fresh_client(session)
+    files = await list_files(client, AUDIO_BUCKET) + await list_files(client, SHEET_MUSIC_BUCKET)
     try:
-        rows = (await client.rpc("unused_files").execute()).data or []
+        rows = (await client.rpc("unused_files", {"files": files}).execute()).data or []
     except (PostgrestAPIError, httpx.HTTPError) as error:
         raise ApiError(502, "database_failed", str(error)) from None
     names_by_bucket: dict[str, list[str]] = {}
     for row in rows:
         names_by_bucket.setdefault(row["bucket"], []).append(row["name"])
-    try:
-        for bucket, names in names_by_bucket.items():
-            for start in range(0, len(names), REMOVE_BATCH_SIZE):
-                await client.storage.from_(bucket).remove(names[start : start + REMOVE_BATCH_SIZE])
-    except (StorageException, httpx.HTTPError) as error:
-        raise ApiError(502, "storage_failed", str(error)) from None
-    if rows:
-        logger.info("%d unbenutzte Dateien im Bucket gelöscht", len(rows))
-    return len(rows)
+    removed = 0
+    for bucket, names in names_by_bucket.items():
+        removed += len(await delete_files(client, bucket, names))
+    if removed:
+        logger.info("%d unbenutzte Dateien im Bucket gelöscht", removed)
+    return removed
 
 
 async def remove_unused_files_in_background(session: Session) -> None:

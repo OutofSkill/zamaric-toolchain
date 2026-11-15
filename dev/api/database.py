@@ -2,7 +2,7 @@
 
 Alle Abfragen laufen über RPC-Funktionen der Migration dev_site. Sie prüfen
 selbst, dass ein Admin aufruft, und lesen nur. Gelöscht wird nur über
-POST /api/files/cleanup, und dort über die Storage-API, nie per SQL.
+POST /api/files/cleanup, und dort über den Storage-Worker, nie per SQL.
 """
 
 import logging
@@ -102,8 +102,8 @@ async def get_files(session: Session = Depends(current_session)) -> dict:
     return {"unused": unused, "missing": missing}
 
 
-# Löscht über die Storage-API. Die Policy auf storage.objects lässt nur
-# Dateien zu, die unused_files() auch meldet.
+# Löscht über den Storage-Worker. Er löscht nur Dateien, die
+# unused_files(files) auch meldet.
 @router.post("/api/files/cleanup", dependencies=[Depends(require_own_origin)])
 async def post_files_cleanup(session: Session = Depends(current_session)) -> dict:
     removed = await remove_unused_files(session)
