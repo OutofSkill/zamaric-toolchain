@@ -18,6 +18,7 @@ from errors import ApiError
 from files import remove_unused_files
 from queries import PAGE_SIZE, select_all
 from sessions import Session, current_session, existing_session, fresh_client
+from storage import StoredFileMissing, all_files, stored_sha256
 from web import require_own_origin
 
 logger = logging.getLogger("zamaric")
@@ -32,6 +33,20 @@ NOTIFICATIONS = 200
 # Stand des Nachtragens für GET /api/checksums. Es läuft immer nur ein
 # Durchgang gleichzeitig, auch bei mehreren Logins kurz hintereinander.
 backfill_progress = {"running": False, "total": 0, "done": 0, "failed": 0}
+
+verification_progress = {
+    "running": False,
+    "total": 0,
+    "done": 0,
+    "failed": 0,
+    "skipped": 0,
+    "mismatches": [],
+    "finished_at": None,
+    "aborted": None,
+}
+
+VERIFICATION_STOPPING_ERRORS = {"unauthorized", "forbidden", "database_failed"}
+STORAGE_FAILURES_BEFORE_ABORT = 5
 
 
 def database_error(error: Exception) -> ApiError:
@@ -82,9 +97,10 @@ def now_iso() -> str:
 @router.get("/api/integrity")
 async def get_integrity(session: Session = Depends(current_session)) -> dict:
     client = await fresh_client(session)
+    files = await all_files(client)
     try:
         findings = await rpc_all(
-            client, "integrity_report", ["check_name", "table_name", "row_id", "song_id", "detail"]
+            client, "integrity_report", ["check_name", "table_name", "row_id", "song_id", "detail"], {"files": files}
         )
     except (PostgrestAPIError, httpx.HTTPError) as error:
         raise database_error(error) from None
@@ -94,9 +110,10 @@ async def get_integrity(session: Session = Depends(current_session)) -> dict:
 @router.get("/api/files")
 async def get_files(session: Session = Depends(current_session)) -> dict:
     client = await fresh_client(session)
+    files = await all_files(client)
     try:
-        unused = await rpc_all(client, "unused_files", ["bucket", "name"])
-        missing = await rpc_all(client, "missing_files", ["table_name", "row_id"])
+        unused = await rpc_all(client, "unused_files", ["bucket", "name"], {"files": files})
+        missing = await rpc_all(client, "missing_files", ["table_name", "row_id"], {"files": files})
     except (PostgrestAPIError, httpx.HTTPError) as error:
         raise database_error(error) from None
     return {"unused": unused, "missing": missing}
@@ -181,6 +198,106 @@ async def post_checksums(background_tasks: BackgroundTasks, session: Session = D
     return dict(backfill_progress)
 
 
+def claim_verification() -> bool:
+    if verification_progress["running"]:
+        return False
+    verification_progress.update(
+        running=True, total=0, done=0, failed=0, skipped=0, mismatches=[], finished_at=None, aborted=None
+    )
+    return True
+
+
+def verification_state() -> dict:
+    return {**verification_progress, "mismatches": list(verification_progress["mismatches"])}
+
+
+async def verify_all_sha256(session: Session) -> None:
+    progress = verification_progress
+    try:
+        client = await fresh_client(session)
+        song_names = {row["id"]: row["name"] for row in await select_all(client, "song", "id, name", ["id"])}
+        work = []
+        for table, bucket in FILE_TABLES:
+            rows = await select_all(
+                await fresh_client(session),
+                table,
+                "id, song_id, path, sha256",
+                ["id"],
+                lambda query: query.not_.is_("path", "null"),
+            )
+            work.extend((table, bucket, row) for row in rows)
+        progress["total"] = len(work)
+        consecutive_failures = 0
+        for table, bucket, row in work:
+            if session.session_id not in sessions.sessions:
+                progress["aborted"] = "session_ended"
+                logger.info("Prüfsummen prüfen abgebrochen, Session vorbei")
+                return
+            if not row["sha256"]:
+                progress["skipped"] += 1
+                progress["done"] += 1
+                continue
+            try:
+                actual = await stored_sha256(await fresh_client(session), bucket, row["path"])
+            except ApiError as error:
+                if error.code in VERIFICATION_STOPPING_ERRORS:
+                    raise
+                progress["failed"] += 1
+                if not isinstance(error, StoredFileMissing):
+                    consecutive_failures += 1
+                logger.warning("Prüfsumme für %s %s nicht geprüft (%s)", table, row["id"], error.code)
+            else:
+                consecutive_failures = 0
+                if actual != row["sha256"]:
+                    progress["mismatches"].append(
+                        {
+                            "table_name": table,
+                            "row_id": row["id"],
+                            "song_id": row["song_id"],
+                            "song_name": song_names.get(row["song_id"]),
+                            "bucket": bucket,
+                            "path": row["path"],
+                        }
+                    )
+                    logger.warning("Prüfsumme weicht ab: %s %s (%s/%s)", table, row["id"], bucket, row["path"])
+            progress["done"] += 1
+            if consecutive_failures >= STORAGE_FAILURES_BEFORE_ABORT:
+                progress["aborted"] = "storage_failed"
+                logger.warning("Prüfsummen prüfen abgebrochen, %d Dateien in Folge nicht abrufbar", consecutive_failures)
+                return
+    except Exception as error:
+        if isinstance(error, ApiError):
+            progress["aborted"] = error.code
+        elif isinstance(error, (PostgrestAPIError, httpx.HTTPError)):
+            progress["aborted"] = "database_failed"
+        else:
+            progress["aborted"] = "unexpected"
+        reason = error.code if isinstance(error, ApiError) else type(error).__name__
+        logger.warning("Prüfsummen prüfen fehlgeschlagen (%s)", reason)
+    finally:
+        progress["running"] = False
+        progress["finished_at"] = now_iso()
+        logger.info(
+            "Prüfsummen geprüft: %d, abweichend: %d, nicht abrufbar: %d, ohne Prüfsumme: %d",
+            progress["done"] - progress["failed"] - progress["skipped"],
+            len(progress["mismatches"]),
+            progress["failed"],
+            progress["skipped"],
+        )
+
+
+@router.get("/api/checksums/verify", dependencies=[Depends(existing_session)])
+async def get_verification_progress() -> dict:
+    return verification_state()
+
+
+@router.post("/api/checksums/verify", status_code=202, dependencies=[Depends(require_own_origin)])
+async def post_verification(background_tasks: BackgroundTasks, session: Session = Depends(current_session)) -> dict:
+    if claim_verification():
+        background_tasks.add_task(verify_all_sha256, session)
+    return verification_state()
+
+
 # ---------------------------------------------------------------------------
 # Speicher, Freigaben, Cron, Nachrichten
 # ---------------------------------------------------------------------------
@@ -188,9 +305,10 @@ async def post_checksums(background_tasks: BackgroundTasks, session: Session = D
 @router.get("/api/storage")
 async def get_storage(session: Session = Depends(current_session)) -> dict:
     client = await fresh_client(session)
+    files = await all_files(client)
     try:
-        buckets = await rpc_rows(client, "storage_usage")
-        largest = await rpc_rows(client, "largest_files", {"max_rows": LARGEST_FILES})
+        buckets = await rpc_rows(client, "storage_usage", {"files": files})
+        largest = await rpc_rows(client, "largest_files", {"files": files, "max_rows": LARGEST_FILES})
     except (PostgrestAPIError, httpx.HTTPError) as error:
         raise database_error(error) from None
     return {"buckets": buckets, "largest": largest}

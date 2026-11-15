@@ -9,6 +9,14 @@ const svgNamespace = "http://www.w3.org/2000/svg";
 const checksumPollMs = 1500;
 const checksumRetryMs = 5000;
 const checksumMaxFailures = 3;
+const verificationAbortReasons = {
+  session_ended: "Session vorbei",
+  unauthorized: "Anmeldung abgelaufen",
+  forbidden: "kein Admin",
+  database_failed: "Supabase nicht erreichbar",
+  storage_failed: "Speicher nicht erreichbar",
+  unexpected: "unerwarteter Fehler, siehe Log",
+};
 const unusedHint = "Nur Upload-Tool-Dateien, älter als 1 Std.";
 const latencyRefreshMs = 60 * 1000;
 const ciRefreshMs = 60 * 1000;
@@ -52,6 +60,14 @@ const integrityChecks = {
   },
   file_missing: {
     title: "Datei fehlt im Bucket",
+  },
+  file_unknown: {
+    title: "Fremde Datei im Bucket",
+    text: "Keine Zeile zeigt darauf, Aufräumen löscht sie nicht.",
+  },
+  file_empty: {
+    title: "Leere Datei im Bucket",
+    text: "0 Byte in R2.",
   },
   duplicate_file: {
     title: "Datei doppelt",
@@ -1153,18 +1169,127 @@ function ciView(body, life) {
 // Datenbank
 // ---------------------------------------------------------------------------
 
+function backgroundJob({ life, slot, url, buttonLabel, progressLabel, resultView, showsLastResult = false, onFinished = null }) {
+  const idle = { running: false, total: 0, done: 0, failed: 0 };
+  const state = { progress: null, timer: null, starting: false, failures: 0, pollError: null };
+  life.onCleanup(() => clearTimeout(state.timer));
+
+  function draw() {
+    const progress = state.progress;
+    const running = Boolean(progress?.running) || state.starting;
+    let status = null;
+    if (progress?.error) {
+      status = errorView(progress.error);
+    } else if (state.pollError) {
+      // Stand nicht mehr abrufbar: Fehler mit Ausweg statt eines ewig gesperrten Knopfs
+      status = h(
+        "p",
+        { class: "muted", role: "status" },
+        `${errorText(state.pollError)} `,
+        h("button", { class: "button small", type: "button", onclick: retry }, "Erneut versuchen"),
+      );
+    } else if (running) {
+      const percent = progress?.total ? Math.round((progress.done / progress.total) * 100) : 0;
+      status = [
+        h(
+          "div",
+          { class: "progress", role: "progressbar", "aria-label": progressLabel, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(percent) },
+          h("span", { style: `width: ${percent}%` }),
+        ),
+        h("p", { class: "muted", role: "status" }, progress?.total ? `${progress.done} / ${progress.total}` : "Sucht …"),
+      ];
+    } else if (progress?.finished || (showsLastResult && progress?.finished_at)) {
+      status = resultView(progress);
+    }
+    fill(
+      slot,
+      status,
+      state.pollError
+        ? null
+        : h(
+            "button",
+            { class: "button small", type: "button", disabled: running, onclick: start },
+            running ? "Läuft …" : buttonLabel,
+          ),
+    );
+  }
+
+  function retry() {
+    state.failures = 0;
+    state.pollError = null;
+    draw();
+    poll();
+  }
+
+  function apply(progress) {
+    const wasRunning = state.progress?.running ?? false;
+    state.progress = { ...progress, finished: !progress.running && (wasRunning || state.progress?.finished) };
+    draw();
+    if (wasRunning && !progress.running && !state.starting) onFinished?.(progress);
+    clearTimeout(state.timer);
+    if (progress.running) state.timer = setTimeout(poll, checksumPollMs);
+  }
+
+  async function poll() {
+    if (!life.alive) return;
+    try {
+      const progress = await load(url, life);
+      if (!life.alive) return;
+      state.failures = 0;
+      state.pollError = null;
+      apply(progress ?? idle);
+    } catch (error) {
+      if (!life.alive) return;
+      clearTimeout(state.timer);
+      if (isSessionExpired(error)) return;
+      if (!state.progress) {
+        state.progress = { running: false, error };
+        draw();
+        return;
+      }
+      if (!state.progress.running) return;
+      // Ein einzelner Netzfehler während eines Durchgangs: später erneut fragen
+      state.failures += 1;
+      if (state.failures >= checksumMaxFailures) {
+        state.pollError = error;
+        draw();
+        return;
+      }
+      state.timer = setTimeout(poll, checksumRetryMs);
+    }
+  }
+
+  async function start() {
+    state.starting = true;
+    state.progress = { ...idle, running: true, finished: false };
+    draw();
+    try {
+      const progress = await load(url, life, { method: "POST" });
+      if (!life.alive) return;
+      state.starting = false;
+      apply(progress ?? idle);
+    } catch (error) {
+      if (!life.alive) return;
+      state.starting = false;
+      state.progress = { running: false, error };
+      draw();
+    }
+  }
+
+  return { draw, poll };
+}
+
 export function renderDatabase(container, { signal } = {}) {
   const life = lifecycle(signal);
   const slots = {
     integrity: h("div", {}),
     files: h("div", {}),
     checksums: h("div", { class: "db-checksums" }),
+    verification: h("div", { class: "db-verification" }),
     storage: h("div", {}),
     releases: h("div", {}),
     cron: h("div", {}),
   };
-  const checksumState = { progress: null, timer: null, starting: false, failures: 0, pollError: null };
-  life.onCleanup(() => clearTimeout(checksumState.timer));
 
   const loadAll = () => {
     loadInto(slots.integrity, life, "/api/integrity", drawIntegrity);
@@ -1172,10 +1297,33 @@ export function renderDatabase(container, { signal } = {}) {
     loadInto(slots.storage, life, "/api/storage", drawStorage);
     loadInto(slots.releases, life, "/api/releases", drawReleases);
     loadInto(slots.cron, life, "/api/cron", drawCron);
-    pollChecksums();
+    backfill.poll();
+    verification.poll();
   };
 
   const loadFiles = () => loadInto(slots.files, life, "/api/files", drawFiles);
+  const backfill = backgroundJob({
+    life,
+    slot: slots.checksums,
+    url: "/api/checksums",
+    buttonLabel: "Prüfsummen nachtragen",
+    progressLabel: "Prüfsummen",
+    resultView: drawBackfillResult,
+    // Nach dem Durchgang stimmen Integrität und Dateien nicht mehr
+    onFinished: () => {
+      loadInto(slots.integrity, life, "/api/integrity", drawIntegrity);
+      loadFiles();
+    },
+  });
+  const verification = backgroundJob({
+    life,
+    slot: slots.verification,
+    url: "/api/checksums/verify",
+    buttonLabel: "Prüfsummen prüfen",
+    progressLabel: "Prüfsummen prüfen",
+    resultView: drawVerificationResult,
+    showsLastResult: true,
+  });
   const leftColumn = h(
     "div",
     { class: "db-stack" },
@@ -1196,6 +1344,7 @@ export function renderDatabase(container, { signal } = {}) {
         { class: "grid" },
         // Prüfsummen als Aktion im Kopf der Integrität statt eines fast leeren eigenen Panels
         panel({ title: "Integrität", wide: true, actions: slots.checksums }, slots.integrity),
+        panel({ title: "Prüfsummen prüfen", wide: true }, slots.verification),
         // Links drei kleine Panels übereinander, rechts die Cron-Läufe. Die Zahl der sichtbaren
         // Läufe richtet sich nach der Höhe links, so enden beide Spalten bündig.
         h(
@@ -1354,117 +1503,56 @@ export function renderDatabase(container, { signal } = {}) {
     );
   }
 
-  function drawChecksums() {
-    const progress = checksumState.progress;
-    const running = Boolean(progress?.running) || checksumState.starting;
-    let status = null;
-    if (progress?.error) {
-      status = errorView(progress.error);
-    } else if (checksumState.pollError) {
-      // Stand nicht mehr abrufbar: Fehler mit Ausweg statt eines ewig gesperrten Knopfs
-      status = h(
-        "p",
-        { class: "muted", role: "status" },
-        `${errorText(checksumState.pollError)} `,
-        h("button", { class: "button small", type: "button", onclick: retryChecksums }, "Erneut versuchen"),
-      );
-    } else if (running) {
-      const percent = progress?.total ? Math.round((progress.done / progress.total) * 100) : 0;
-      status = [
-        h(
-          "div",
-          { class: "progress", role: "progressbar", "aria-label": "Prüfsummen", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(percent) },
-          h("span", { style: `width: ${percent}%` }),
-        ),
-        h("p", { class: "muted", role: "status" }, progress?.total ? `${progress.done} / ${progress.total}` : "Sucht …"),
-      ];
-    } else if (progress?.finished) {
-      const added = progress.done - progress.failed;
-      status = h(
-        "p",
-        { class: "muted", role: "status" },
-        progress.total === 0
-          ? "Alle vorhanden."
-          : `${added} nachgetragen${progress.failed ? `, ${progress.failed} fehlgeschlagen` : ""}.`,
-      );
-    }
-    fill(
-      slots.checksums,
-      status,
-      checksumState.pollError
-        ? null
-        : h(
-            "button",
-            { class: "button small", type: "button", disabled: running, onclick: startChecksums },
-            running ? "Läuft …" : "Prüfsummen nachtragen",
-          ),
+  function drawBackfillResult(progress) {
+    const added = progress.done - progress.failed;
+    return h(
+      "p",
+      { class: "muted", role: "status" },
+      progress.total === 0
+        ? "Alle vorhanden."
+        : `${added} nachgetragen${progress.failed ? `, ${progress.failed} fehlgeschlagen` : ""}.`,
     );
   }
 
-  function retryChecksums() {
-    checksumState.failures = 0;
-    checksumState.pollError = null;
-    drawChecksums();
-    pollChecksums();
-  }
-
-  function applyChecksumProgress(progress) {
-    const wasRunning = checksumState.progress?.running ?? false;
-    checksumState.progress = { ...progress, finished: !progress.running && (wasRunning || checksumState.progress?.finished) };
-    drawChecksums();
-    // Nach dem Durchgang stimmen Integrität und Dateien nicht mehr
-    if (wasRunning && !progress.running && !checksumState.starting) {
-      loadInto(slots.integrity, life, "/api/integrity", drawIntegrity);
-      loadFiles();
+  function drawVerificationResult(progress) {
+    const mismatches = progress.mismatches ?? [];
+    const skipped = progress.skipped ?? 0;
+    const checked = progress.done - progress.failed - skipped;
+    const incomplete = Boolean(progress.aborted) || progress.done < progress.total;
+    const parts = [`${numberFormat.format(checked)} geprüft`];
+    if (progress.failed) parts.push(`${numberFormat.format(progress.failed)} nicht abrufbar`);
+    if (skipped) parts.push(`${numberFormat.format(skipped)} ohne Prüfsumme`);
+    if (incomplete) {
+      const reason = verificationAbortReasons[progress.aborted] ?? progress.aborted;
+      parts.push(
+        `abgebrochen nach ${numberFormat.format(progress.done)} / ${numberFormat.format(progress.total)}${reason ? ` (${reason})` : ""}`,
+      );
     }
-    clearTimeout(checksumState.timer);
-    if (progress.running) checksumState.timer = setTimeout(pollChecksums, checksumPollMs);
-  }
-
-  async function pollChecksums() {
-    if (!life.alive) return;
-    try {
-      const progress = await load("/api/checksums", life);
-      if (!life.alive) return;
-      checksumState.failures = 0;
-      checksumState.pollError = null;
-      applyChecksumProgress(progress ?? { running: false, total: 0, done: 0, failed: 0 });
-    } catch (error) {
-      if (!life.alive) return;
-      clearTimeout(checksumState.timer);
-      if (isSessionExpired(error)) return;
-      if (!checksumState.progress) {
-        checksumState.progress = { running: false, error };
-        drawChecksums();
-        return;
-      }
-      if (!checksumState.progress.running) return;
-      // Ein einzelner Netzfehler während eines Durchgangs: später erneut fragen
-      checksumState.failures += 1;
-      if (checksumState.failures >= checksumMaxFailures) {
-        checksumState.pollError = error;
-        drawChecksums();
-        return;
-      }
-      checksumState.timer = setTimeout(pollChecksums, checksumRetryMs);
-    }
-  }
-
-  async function startChecksums() {
-    checksumState.starting = true;
-    checksumState.progress = { running: true, total: 0, done: 0, failed: 0, finished: false };
-    drawChecksums();
-    try {
-      const progress = await load("/api/checksums", life, { method: "POST" });
-      if (!life.alive) return;
-      checksumState.starting = false;
-      applyChecksumProgress(progress ?? { running: false, total: 0, done: 0, failed: 0 });
-    } catch (error) {
-      if (!life.alive) return;
-      checksumState.starting = false;
-      checksumState.progress = { running: false, error };
-      drawChecksums();
-    }
+    const chip = mismatches.length
+      ? statusChip("error", plural(mismatches.length, "Abweichung", "Abweichungen"))
+      : incomplete || progress.failed
+        ? statusChip("warn", "Nicht vollständig geprüft")
+        : progress.total === 0
+          ? statusChip("warn", "Keine Dateien gefunden")
+          : statusChip("ok", "Alle stimmen");
+    return [
+      h("p", { class: "db-summary", role: "status" }, chip, h("span", { class: "muted" }, `${parts.join(", ")} · `, timeElement(progress.finished_at))),
+      mismatches.length
+        ? table(
+            ["Song", "Tabelle", { label: "ID", numeric: true }, "Datei"],
+            mismatches.map((row) =>
+              h(
+                "tr",
+                {},
+                cell(row.song_name ?? (row.song_id != null ? `Song ${row.song_id}` : "–")),
+                cell(tableNames[row.table_name] ?? row.table_name),
+                cell(String(row.row_id), { numeric: true, mono: true }),
+                cell(`${row.bucket}/${row.path}`, { mono: true, className: "db-path" }),
+              ),
+            ),
+          )
+        : null,
+    ];
   }
 
   function drawStorage(data) {
@@ -1587,7 +1675,8 @@ export function renderDatabase(container, { signal } = {}) {
     }
   }
 
-  drawChecksums();
+  backfill.draw();
+  verification.draw();
   loadAll();
   return () => life.dispose();
 }

@@ -108,7 +108,7 @@ upload/
 | `sessions.py` | Login, Sessions, Login-Sperre, Token-Erneuerung (`fresh_client`). Liest `config.settings` des jeweiligen Tools |
 | `errors.py` | `ApiError`: Fehler mit festem Code für den Browser |
 | `queries.py` | `select_all`: alle Zeilen einer Tabelle seitenweise |
-| `storage.py` | Zugriff auf R2 über den Storage-Worker (`STORAGE_URL`) mit dem Token der Session: `upload_file` (mit SHA-256), `download_file`, `list_files`, `delete_files`. Worker-Antwort `401` → `unauthorized`, `403` → `forbidden`, sonst `storage_failed` |
+| `storage.py` | Zugriff auf R2 über den Storage-Worker (`STORAGE_URL`) mit dem Token der Session: `upload_file` (mit SHA-256), `download_file`, `stored_sha256` (liest gestückelt und hasht), `list_files`, `all_files` (beide Buckets), `delete_files`. Worker-Antwort `401` → `unauthorized`, `403` → `forbidden`, sonst `storage_failed` (bei `404` als `StoredFileMissing`, nach außen gleich). Hoch- und Herunterladen warten höchstens 300 s, alles andere 30 s, jeweils pro Verbindungsaufbau und Lesevorgang |
 | `checksums.py` | `backfill_sha256`: Prüfsumme einer Datei nachtragen, `missing_sha256`, Bucket je Tabelle |
 | `files.py` | `remove_unused_files`: Dateiliste aus R2, `unused_files(files)` wählt die unbenutzten, der Worker löscht sie und prüft dabei selbst noch einmal. Auch als Hintergrund-Variante, die nur loggt |
 
@@ -744,7 +744,7 @@ Alle Punkte des [Upload-Tools](#sicherheit) gelten hier genauso: feste Fehlercod
 - **CSP:** `default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`. Kein `media-src`.
 - **Markdown** (README, Karten) geht nur über DOMPurify ins DOM. `style`, `form`, `input` und `button` sind zusätzlich verboten. Links öffnen in einem neuen Tab mit `rel="noopener noreferrer"`. Bilder bleiben nur als `data:image/…`, alle anderen werden durch ihren Alt-Text ersetzt, damit keine fremden Server angefragt werden. Alles andere setzt die Website nur als Text ein.
 - **GitHub-Token** nur im Header an api.github.com, nie im Log oder in Fehlermeldungen.
-- **Bucket:** Unbenutzte Dateien löscht nur der Knopf in „Unbenutzte Dateien“, über den Storage-Worker, der vor dem Löschen selbst `unused_files(files)` fragt. Die übrigen SQL-Funktionen lesen bis zum Umbau der Entwicklerseite noch `storage.objects`.
+- **Bucket:** Unbenutzte Dateien löscht nur der Knopf in „Unbenutzte Dateien“, über den Storage-Worker, der vor dem Löschen selbst `unused_files(files)` fragt. Alle Prüf- und Übersichtsfunktionen bekommen die Dateiliste aus R2 (`all_files` in `shared/storage.py`) und lesen nur.
 
 ### Board (SQLite)
 
@@ -796,12 +796,14 @@ Für alle gilt die Tabelle unter [Upload-Tool → Endpunkte](#endpunkte) (`401`,
 | `PATCH` | `/api/board/cards/{id}` `{ title, body, color? }` (Titel und Text Pflicht, ohne `color` bleibt die Farbe) | Karte | `404`, `422` |
 | `DELETE` | `/api/board/cards/{id}` | `204` | `404` |
 | `POST` | `/api/board/cards/{id}/move` `{ column_id, index }` | `204` | `404`, `422` |
-| `GET` | `/api/integrity` | `{ checked_at, findings: [integrity_report()] }` | `502` |
-| `GET` | `/api/files` | `{ unused: [{ bucket, name }], missing: [missing_files()] }` | `502` |
+| `GET` | `/api/integrity` | `{ checked_at, findings: [integrity_report(files)] }` | `502` |
+| `GET` | `/api/files` | `{ unused: [unused_files(files)], missing: [missing_files(files)] }` | `502` |
 | `POST` | `/api/files/cleanup` | `{ removed }` | `401 unauthorized` / `403 forbidden` / `502 storage_failed` / `database_failed` |
 | `GET` | `/api/checksums` | `{ running, total, done, failed }`, verlängert die Session nicht | |
 | `POST` | `/api/checksums` | `202`, wie `GET`. Läuft schon ein Durchgang, kommt dessen Stand | |
-| `GET` | `/api/storage` | `{ buckets: [storage_usage()], largest: [largest_files(20)] }` | `502` |
+| `GET` | `/api/checksums/verify` | `{ running, total, done, failed, skipped, mismatches: [{ table_name, row_id, song_id, song_name, bucket, path }], finished_at, aborted }`, verlängert die Session nicht | |
+| `POST` | `/api/checksums/verify` | `202`, wie `GET`. Läuft schon ein Durchgang, kommt dessen Stand | |
+| `GET` | `/api/storage` | `{ buckets: [storage_usage(files)], largest: [largest_files(files, 20)] }` | `502` |
 | `GET` | `/api/releases` | `{ pending: [pending_releases()] }` | `502` |
 | `GET` | `/api/cron` | `{ runs: [cron_runs(50)] }` | `502` |
 | `GET` | `/api/notifications` | `{ notifications: [notification_feed(200)] }` | `502` |
@@ -811,7 +813,11 @@ Für alle gilt die Tabelle unter [Upload-Tool → Endpunkte](#endpunkte) (`401`,
 | `GET` | `/api/ci` | `{ configured, runs: [{ id, status, conclusion, branch, commit (voller Hash), title, event, started_at, updated_at, url }], latest_jobs: [{ name, status, conclusion, steps }] }`, 120 s Cache | `502 github_failed` |
 | `GET` | `/api/latency` | `{ interval_seconds: 60, samples: [{ at, ms, ok }] }`, verlängert die Session nicht | |
 
+`files` ist bei `/api/integrity`, `/api/files` und `/api/storage` die Dateiliste aus R2, die Container 2 vor jeder Abfrage über den Storage-Worker holt (`all_files`, wartet höchstens 30 s auf Verbindung und jeden Lesevorgang). Ist der Worker nicht erreichbar, antworten sie mit `502 storage_failed`, lehnt er das Token ab mit `401 unauthorized`, ist der Account kein Admin mit `403 forbidden`.
+
 **Prüfsummen nachtragen** (`backfill_missing_sha256`, aus dem Upload-Tool umgezogen): alle Zeilen in `count_in`, `playback` und `sheet_music` mit Datei, aber ohne Prüfsumme. Datei für Datei herunterladen, hashen, über `set_file_sha256` eintragen. Es läuft immer nur ein Durchgang. Fehlt eine Datei im Bucket, wird sie übersprungen und beim nächsten Durchgang wieder versucht. Endet mit der Session. Im Log steht am Ende „Prüfsummen nachgetragen: N, fehlgeschlagen: M“.
+
+**Prüfsummen prüfen** (`verify_all_sha256`): alle Zeilen in `count_in`, `playback` und `sheet_music` mit Datei, auch wartende. Jede Datei wird über den Storage-Worker aus R2 gelesen, gestückelt gehasht (`stored_sha256`, nie ganz im Speicher) und mit `sha256` der Zeile verglichen. Zeilen ohne Prüfsumme zählen als `skipped`, nicht abrufbare Dateien als `failed`, Abweichungen stehen mit Song und Datei in `mismatches`. Es läuft immer nur ein Durchgang, unabhängig vom Nachtragen. Er bricht ab, wenn die Session endet (`aborted: "session_ended"`), der Worker das Token ablehnt (`unauthorized`), der Account kein Admin ist (`forbidden`) oder Supabase nicht erreichbar ist (`database_failed`), ebenso nach 5 Dateien in Folge, die nicht abrufbar sind (`storage_failed`; Dateien, die in R2 fehlen, zählen dafür nicht), sonst `unexpected`. Jede Anfrage an den Worker wartet dabei höchstens 30 s auf Verbindung und jedes Datenstück. Ohne Abbruch ist `aborted` `null`. Das Ergebnis bleibt bis zum nächsten Durchgang oder Neustart des Containers im Speicher. Im Log steht am Ende „Prüfsummen geprüft: N, abweichend: M, nicht abrufbar: K, ohne Prüfsumme: L“, jede Abweichung zusätzlich als Warnung.
 
 **Übersicht** (`overview.py`): Alle Teile laufen parallel, jeder höchstens 15 s (sonst `{ error: "timeout" }`). Ein Fehler betrifft nur seinen Teil. Ist Supabase beim Erneuern des Tokens nicht erreichbar, bekommen nur die Supabase-Teile `database_failed`, Antwortzeit, GitHub und Repo kommen trotzdem.
 
@@ -819,12 +825,12 @@ Für alle gilt die Tabelle unter [Upload-Tool → Endpunkte](#endpunkte) (`401`,
 |---|---|---|
 | `latency` | `last`, `down_since` (Beginn des laufenden Ausfalls), `median_ms`, `failures` (24 h), `samples` | Ringpuffer von `monitor.py` |
 | `ci` | `configured`, `workflow`, `latest` (letzter Lauf) | `/api/ci`-Cache |
-| `integrity` | `errors`, `warnings` | `integrity_report()`, 5 min gecacht |
+| `integrity` | `errors`, `warnings` | `integrity_report(files)`, 5 min gecacht |
 | `cron` | `latest` (letzter Lauf), `failed_24h` | `cron_runs(50)` |
 | `content` | `songs`, `pending_songs`, `playbacks`, `sheet_music`, `count_ins`, `categories` | Zählabfragen (`count=exact`), sichtbar = `release_at is null` |
 | `repo` | `head`, `fetched_at`, `latest` (Commit), `this_week`, `last_week`, `weeks` (12) | git, Wochen bei jeder Anfrage aus einem Zähler je HEAD gebaut |
 | `releases` | `next` (früheste wartende Freigabe), `more` | `pending_releases()` |
-| `storage` | `buckets`, `total_bytes` | `storage_usage()`, 5 min gecacht |
+| `storage` | `buckets`, `total_bytes` | `storage_usage(files)`, 5 min gecacht |
 | `notifications` | `latest` (3) | `notification_feed(3)` |
 
 **Git:** Ergebnisse liegen je HEAD im Speicher, die Statistik wird pro HEAD nur einmal gerechnet. Die Wochenliste entsteht bei jeder Anfrage neu aus dem heutigen Datum, damit „diese Woche“ auch ohne neuen Commit stimmt. Sprachen nach Dateiendung im Baum von HEAD; Binärdateien und Dateien über 2 MB zählen nur als Dateien. Commit-Art ist das Präfix vor dem Doppelpunkt (`feat`, `fix`, `docs` …), sonst `other`.
@@ -841,7 +847,7 @@ Navigation über den Hash (`#overview` als Start, `#board`, `#repo`, `#database`
 - **Board:** Spalten nebeneinander, horizontal scrollbar. Spalten anlegen, inline umbenennen, über ⋯ verschieben oder am Griff ziehen, löschen (mit Rückfrage, wenn Karten drin sind). Karten mit Titel, Farbe und Markdown-Text im Editor (Schreiben/Vorschau, ⌘/Strg+Enter speichert), Spalte im Editor wählbar, per Drag & Drop innerhalb und zwischen Spalten. Änderungen erscheinen sofort, schlägt die Anfrage fehl, lädt das Board neu. Schlägt auch das Neuladen fehl, bleiben die Spalten stehen und eine Fehlerzeile mit „Erneut versuchen“ erscheint.
 - **Repo** (App-Repo `zamaric`): Verlauf (nach Tag, eine Zeile pro Commit mit Art als Chip, Hash, Uhrzeit, +/− Zeilen, „Mehr laden“, „gepullt vor …“ im Kopf), Statistik (Kennzahlen inkl. Autoren, Commits pro Woche ab dem ersten Commit, Sprachen neben Commit-Arten, meistgeänderte Dateien), README gerendert mit Inhaltsverzeichnis auf Lesebreite, GitHub (letzter Lauf mit Jobs und Schritten, ältere als Tabelle, lädt jede Minute nach, solange ein Lauf noch läuft, auch nach einem Fehler).
 - **Datenbank:**
-  - **Integrität:** Funde von `integrity_report()`, gruppiert nach Prüfung:
+  - **Integrität:** Funde von `integrity_report(files)`, gruppiert nach Prüfung:
 
     | `check_name` | Schwere | Meldet |
     |---|---|---|
@@ -850,7 +856,9 @@ Navigation über den Hash (`#overview` als Start, `#board`, `#repo`, `#database`
     | `letter_count_in_other_song` | error | Einzähler des Buchstabens gehört zu einem anderen Song |
     | `count_in_unused` | warning | sichtbarer Einzähler ohne Buchstaben |
     | `missing_sha256` | warning | Zeile mit Datei, aber ohne Prüfsumme |
-    | `file_missing` | error | Datei der Zeile fehlt im Bucket |
+    | `file_missing` | error | Datei der Zeile fehlt in R2 |
+    | `file_unknown` | warning | Datei in R2, auf die keine Zeile zeigt und deren Name nicht `<uuid>.mp3` (in `audio`) bzw. `<uuid>.pdf` (in `sheet_music`) ist. Das Aufräumen löscht sie nie |
+    | `file_empty` | error | Datei in R2 mit 0 Byte, mit der Zeile, die auf sie zeigt |
     | `duplicate_file` | warning | Playbacks und Einzähler: gleiche Prüfsumme mehrfach in der Tabelle (nur Zeilen mit eigener Datei). Noten: gleiche Datei in verschiedenen Songs, oder in einem Song zwei oder mehr verschiedene Dateien, die jeweils doppelt vorkommen. Ein einzelnes doppeltes Blatt pro Song (z. B. Akkordeon für mehrere Stimmen) ist gewollt |
     | `release_overdue` | error | wartende Datei-Zeile, deren `release_at` über 2 Stunden her ist (der stündliche Cron-Job hätte sie übernehmen müssen). Neue Songs werden ohne Job sichtbar und zählen nicht |
     | `replaces_other_song` | error | `replaces_id` zeigt auf eine Zeile eines anderen Songs |
@@ -858,7 +866,8 @@ Navigation über den Hash (`#overview` als Start, `#board`, `#repo`, `#database`
     | `display_without_effect` | warning | `display_playback`-Zeilen bei `instrument_mode` `all` |
     | `category_empty` | warning | Kategorie ohne Songs |
   - **Prüfsummen:** Knopf „Prüfsummen nachtragen“ im Kopf der Integrität, Fortschritt alle 1,5 s („12 / 42“). Ein Netzfehler wird nach 5 s erneut versucht, nach 3 Fehlern in Folge steht „Erneut versuchen“ da. Am Ende laden Integrität und Dateien neu.
-  - **Unbenutzte Dateien** (`unused_files()`), Knopf „Löschen“ mit Rückfrage, danach laden Dateien, Speicher und Integrität neu. Fehlende Dateien stehen nur in der Integrität (`file_missing`).
+  - **Prüfsummen prüfen:** eigenes Panel unter der Integrität mit Knopf „Prüfsummen prüfen“, Fortschritt wie beim Nachtragen (gleicher Code, `backgroundJob` in `views.js`). Danach: „Alle stimmen“, „Nicht vollständig geprüft“ oder die Zahl der Abweichungen, dazu geprüft / nicht abrufbar / ohne Prüfsumme und der Zeitpunkt, darunter die Abweichungen als Tabelle. Das letzte Ergebnis steht auch nach dem Neuladen der Seite da.
+  - **Unbenutzte Dateien** (`unused_files(files)`), Knopf „Löschen“ mit Rückfrage, danach laden Dateien, Speicher und Integrität neu. Fehlende Dateien stehen nur in der Integrität (`file_missing`).
   - **Speicher** je Bucket mit den 20 größten Dateien, **Wartende Freigaben**, **Cron-Läufe** (rechts neben den drei anderen, so viele Läufe wie in die Höhe passen, ältere aufklappbar; Meldung nur bei Fehlschlag).
 - **Nachrichten:** Verlauf aus `notification_feed()`, ein Panel pro Tag, eine Zeile pro Nachricht, mit Suche und Zustellstatus aus `status_code`.
 - **Server:** aktuelle Messung, Median, P95, Fehlmessungen (24 h), Verlauf als Linie mit roten Ausfällen, Ausfälle als Zeiträume, Tabelle pro Stunde. Aktualisiert sich jede Minute, solange der Tab sichtbar ist.

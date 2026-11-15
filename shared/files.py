@@ -11,7 +11,7 @@ from supabase import PostgrestAPIError
 
 from errors import ApiError
 from sessions import Session, fresh_client
-from storage import AUDIO_BUCKET, SHEET_MUSIC_BUCKET, delete_files, list_files
+from storage import all_files, delete_files
 
 logger = logging.getLogger("zamaric")
 
@@ -22,7 +22,7 @@ async def remove_unused_files(session: Session) -> int:
     Ein Fehler kommt als ApiError mit festem Code zurück.
     """
     client = await fresh_client(session)
-    files = await list_files(client, AUDIO_BUCKET) + await list_files(client, SHEET_MUSIC_BUCKET)
+    files = await all_files(client)
     try:
         rows = (await client.rpc("unused_files", {"files": files}).execute()).data or []
     except (PostgrestAPIError, httpx.HTTPError) as error:

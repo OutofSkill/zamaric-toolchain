@@ -961,6 +961,26 @@
   width: 140px;
 }
 
+.db-verification {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.db-verification > p,
+.db-verification > .db-summary {
+  margin: 0;
+}
+
+.db-verification .progress {
+  width: min(320px, 100%);
+}
+
+.db-verification > .view-table-scroll {
+  align-self: stretch;
+}
+
 .db-path {
   font-size: 0.82rem;
   overflow-wrap: anywhere;

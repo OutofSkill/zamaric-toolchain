@@ -23,6 +23,7 @@ from config import settings
 from database import CRON_RUNS, database_error, now_iso, rpc_all, rpc_rows
 from errors import ApiError
 from sessions import Session, existing_session, fresh_client
+from storage import all_files
 
 logger = logging.getLogger("zamaric")
 
@@ -106,7 +107,9 @@ async def ci_summary() -> dict:
 
 
 async def integrity_summary(client: AsyncClient) -> dict:
-    findings = await rpc_all(client, "integrity_report", ["check_name", "table_name", "row_id", "song_id", "detail"])
+    findings = await rpc_all(
+        client, "integrity_report", ["check_name", "table_name", "row_id", "song_id", "detail"], {"files": await all_files(client)}
+    )
     return {
         "errors": sum(1 for finding in findings if finding["severity"] == "error"),
         "warnings": sum(1 for finding in findings if finding["severity"] == "warning"),
@@ -178,7 +181,7 @@ async def releases_summary(client: AsyncClient) -> dict:
 
 
 async def storage_summary(client: AsyncClient) -> dict:
-    buckets = await rpc_rows(client, "storage_usage")
+    buckets = await rpc_rows(client, "storage_usage", {"files": await all_files(client)})
     return {"buckets": buckets, "total_bytes": sum(bucket["total_bytes"] or 0 for bucket in buckets)}
 
 
