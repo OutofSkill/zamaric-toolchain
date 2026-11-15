@@ -590,7 +590,7 @@ Danach `http://localhost:8000/?demo` öffnen.
 
 ## Entwicklerseite
 
-Website auf dem Pi nur für Phil: ein Board für TODOs im Stil von Padlet, Commit-Verlauf, Statistik und README aus dem App-Repo `zamaric`, der Status der GitHub Actions, Prüfungen der DB und der Buckets, der Verlauf der ntfy-Nachrichten und die Antwortzeit von Supabase. Aufgebaut wie das [Upload-Tool](#upload-tool) und mit demselben Login-Code (`shared/`), aber als eigener Stack mit eigenem NetBird-Gerät.
+Website auf dem Pi nur für Phil: ein Board für TODOs im Stil von Padlet, Commit-Verlauf, Statistik und README aus dem App-Repo `zamaric`, der Status der GitHub Actions, Prüfungen der DB und der Buckets, der Verlauf der ntfy-Nachrichten und die Antwortzeit von Supabase und vom Speicher (R2 über den Storage-Worker). Aufgebaut wie das [Upload-Tool](#upload-tool) und mit demselben Login-Code (`shared/`), aber als eigener Stack mit eigenem NetBird-Gerät.
 
 ### Aufbau
 
@@ -611,7 +611,7 @@ Container 2: api                (Python)
   /api/checksums                fehlende Prüfsummen nachtragen (aus dem Upload-Tool hierher umgezogen)
   /api/git/*, /api/readme       git log/show/ls-tree auf dem eingehängten .git
   /api/ci                       GitHub REST (Actions), nur lesender Token
-  /api/latency                  jede Minute /auth/v1/health, ohne Anmeldung
+  /api/latency                  jede Minute /auth/v1/health und /health/storage des Workers, ohne Anmeldung
   │
   ├── Supabase (Token des Admins, RLS gilt)
   ├── /repo.git (schreibgeschützt eingehängt: nur das .git des App-Repos zamaric auf dem Pi)
@@ -786,7 +786,7 @@ Für alle gilt die Tabelle unter [Upload-Tool → Endpunkte](#endpunkte) (`401`,
 |---|---|---|---|
 | `POST` | `/api/login`, `/api/logout` | `204`, wie beim Upload-Tool | wie beim Upload-Tool |
 | `GET` | `/api/session` | `204` oder `401`, verlängert die Session nicht | |
-| `GET` | `/api/overview` | `{ generated_at, latency, ci, integrity, cron, content, repo, releases, storage, notifications }`, jeder Teil `{ data }` oder `{ error }` (Details unten), immer `200`, verlängert die Session nicht | `401` |
+| `GET` | `/api/overview` | `{ generated_at, latency, storage_latency, ci, integrity, cron, content, repo, releases, storage, notifications }`, jeder Teil `{ data }` oder `{ error }` (Details unten), immer `200`, verlängert die Session nicht | `401` |
 | `GET` | `/api/board` | `{ columns: [{ id, title, cards: [{ id, title, body, color, updated_at }] }] }` | |
 | `POST` | `/api/board/columns` `{ title }` | `201`, neue Spalte am Ende | `422` |
 | `PATCH` | `/api/board/columns/{id}` `{ title }` | `{ id, title }` | `404`, `422` |
@@ -811,7 +811,7 @@ Für alle gilt die Tabelle unter [Upload-Tool → Endpunkte](#endpunkte) (`401`,
 | `GET` | `/api/git/stats` | `{ head, total_commits, first_commit_at, last_commit_at, authors, weeks (52, lückenlos, ab Montag 00:00 Europe/Berlin), types, languages, hot_files (90 Tage, Top 15) }` | `503 repo_unavailable` |
 | `GET` | `/api/readme` | `{ head, markdown }` aus `HEAD:README.md` des App-Repos | `503 repo_unavailable` |
 | `GET` | `/api/ci` | `{ configured, runs: [{ id, status, conclusion, branch, commit (voller Hash), title, event, started_at, updated_at, url }], latest_jobs: [{ name, status, conclusion, steps }] }`, 120 s Cache | `502 github_failed` |
-| `GET` | `/api/latency` | `{ interval_seconds: 60, samples: [{ at, ms, ok }] }`, verlängert die Session nicht | |
+| `GET` | `/api/latency` | `{ interval_seconds: 60, samples: [{ at, ms, ok }], storage_samples: [{ at, ms, ok }] }` (`samples` Supabase, `storage_samples` Speicher), verlängert die Session nicht | |
 
 `files` ist bei `/api/integrity`, `/api/files` und `/api/storage` die Dateiliste aus R2, die Container 2 vor jeder Abfrage über den Storage-Worker holt (`all_files`, wartet höchstens 30 s auf Verbindung und jeden Lesevorgang). Ist der Worker nicht erreichbar, antworten sie mit `502 storage_failed`, lehnt er das Token ab mit `401 unauthorized`, ist der Account kein Admin mit `403 forbidden`.
 
@@ -824,6 +824,7 @@ Für alle gilt die Tabelle unter [Upload-Tool → Endpunkte](#endpunkte) (`401`,
 | Teil | Inhalt | Quelle |
 |---|---|---|
 | `latency` | `last`, `down_since` (Beginn des laufenden Ausfalls), `median_ms`, `failures` (24 h), `samples` | Ringpuffer von `monitor.py` |
+| `storage_latency` | wie `latency`, für den Speicher | Ringpuffer von `monitor.py` |
 | `ci` | `configured`, `workflow`, `latest` (letzter Lauf) | `/api/ci`-Cache |
 | `integrity` | `errors`, `warnings` | `integrity_report(files)`, 5 min gecacht |
 | `cron` | `latest` (letzter Lauf), `failed_24h` | `cron_runs(50)` |
@@ -835,14 +836,14 @@ Für alle gilt die Tabelle unter [Upload-Tool → Endpunkte](#endpunkte) (`401`,
 
 **Git:** Ergebnisse liegen je HEAD im Speicher, die Statistik wird pro HEAD nur einmal gerechnet. Die Wochenliste entsteht bei jeder Anfrage neu aus dem heutigen Datum, damit „diese Woche“ auch ohne neuen Commit stimmt. Sprachen nach Dateiendung im Baum von HEAD; Binärdateien und Dateien über 2 MB zählen nur als Dateien. Commit-Art ist das Präfix vor dem Doppelpunkt (`feat`, `fix`, `docs` …), sonst `other`.
 
-**Antwortzeit:** Ringpuffer mit 1440 Messungen (24 Stunden) im Speicher von Container 2, ein Neustart leert ihn. Erreichbar heißt Status < 500, wie bei der App.
+**Antwortzeit:** je ein Ringpuffer mit 1440 Messungen (24 Stunden) für Supabase und für den Speicher, im Speicher von Container 2, ein Neustart leert sie. Beide werden gleichzeitig gemessen, höchstens 10 s pro Messung. Supabase: `/auth/v1/health`, erreichbar heißt Status < 500, wie bei der App. Speicher: `/health/storage` des Storage-Workers, der dafür R2 fragt; erreichbar heißt nur Status 200. Die Zeit ist also Pi → Cloudflare → Worker → R2 und zurück, so lange wartet die App, bevor ein Download anfängt. Die Download-Geschwindigkeit selbst misst sie nicht.
 
 ### Bereiche der Website
 
 Navigation über den Hash (`#overview` als Start, `#board`, `#repo`, `#database`, `#messages`, `#server`), Seitenleiste ab 900 px, darunter eine Leiste oben. Die Seitenleiste lässt sich über den Knopf neben „zamaric dev“ oder mit `[` (nicht in Eingabefeldern) auf eine 56 px schmale Leiste mit Symbolen einklappen; die Namen erscheinen dann als Tooltip bei Hover und Fokus, der Zustand bleibt im `localStorage` (`zamaric-dev.sidebar`). Login als Fenster über der Seite wie beim Upload-Tool, Session-Check jede Minute bei sichtbarem Tab und beim Zurückkehren. Dark Mode über die Systemeinstellung, `prefers-reduced-motion` wird beachtet.
 
 - **Übersicht** (Startbereich): aktualisiert sich jede Minute, solange der Tab sichtbar ist, beim Zurückkehren sofort, und baut sich nur neu, wenn sich etwas geändert hat. Kein Knopf und kein Hinweis darauf; schlägt ein Neuladen fehl, steht neben dem Titel „Nicht aktuell: <Grund>“. Jede Kachel außer Inhalt führt in ihren Bereich. Ab 1200 × 600 px füllt die Seite genau den Bildschirm (Ampeln oben, darunter 3 + 2 Kacheln), darunter 2 Spalten, unter 640 px 1 Spalte. Inhalt als Balken (wartende Songs schraffiert), Speicher als Ring.
-  - **Ampeln:** Supabase (erreichbar mit Antwortzeit, Fehlmessungen in 24 h, bei Ausfall „seit …“), GitHub (letzter Lauf mit Commit), Integrität (Fehler und Warnungen), Cron (letzter Lauf; gelb, wenn 2 h lang keiner kam). Grau heißt unbekannt oder nicht eingerichtet. Jede Ampel hat Symbol und Text, nicht nur Farbe.
+  - **Ampeln:** Supabase und Speicher (je erreichbar mit Antwortzeit, Fehlmessungen in 24 h, bei Ausfall „seit …“), GitHub (letzter Lauf mit Commit), Integrität (Fehler und Warnungen), Cron (letzter Lauf; gelb, wenn 2 h lang keiner kam). Grau heißt unbekannt oder nicht eingerichtet. Jede Ampel hat Symbol und Text, nicht nur Farbe.
   - **Kacheln:** Inhalt (Songs, davon wartend, Playbacks, Noten, Einzähler, Kategorien), Repo (letzter Commit, diese Woche gegen Vorwoche, 12 Wochen als Säulen, zuletzt gepullt), Nächste Freigabe (überfällige als „fällig“ markiert), Speicher je Bucket, die letzten 3 Nachrichten.
 - **Board:** Spalten nebeneinander, horizontal scrollbar. Spalten anlegen, inline umbenennen, über ⋯ verschieben oder am Griff ziehen, löschen (mit Rückfrage, wenn Karten drin sind). Karten mit Titel, Farbe und Markdown-Text im Editor (Schreiben/Vorschau, ⌘/Strg+Enter speichert), Spalte im Editor wählbar, per Drag & Drop innerhalb und zwischen Spalten. Änderungen erscheinen sofort, schlägt die Anfrage fehl, lädt das Board neu. Schlägt auch das Neuladen fehl, bleiben die Spalten stehen und eine Fehlerzeile mit „Erneut versuchen“ erscheint.
 - **Repo** (App-Repo `zamaric`): Verlauf (nach Tag, eine Zeile pro Commit mit Art als Chip, Hash, Uhrzeit, +/− Zeilen, „Mehr laden“, „gepullt vor …“ im Kopf), Statistik (Kennzahlen inkl. Autoren, Commits pro Woche ab dem ersten Commit, Sprachen neben Commit-Arten, meistgeänderte Dateien), README gerendert mit Inhaltsverzeichnis auf Lesebreite, GitHub (letzter Lauf mit Jobs und Schritten, ältere als Tabelle, lädt jede Minute nach, solange ein Lauf noch läuft, auch nach einem Fehler).
@@ -870,5 +871,5 @@ Navigation über den Hash (`#overview` als Start, `#board`, `#repo`, `#database`
   - **Unbenutzte Dateien** (`unused_files(files)`), Knopf „Löschen“ mit Rückfrage, danach laden Dateien, Speicher und Integrität neu. Fehlende Dateien stehen nur in der Integrität (`file_missing`).
   - **Speicher** je Bucket mit den 20 größten Dateien, **Wartende Freigaben**, **Cron-Läufe** (rechts neben den drei anderen, so viele Läufe wie in die Höhe passen, ältere aufklappbar; Meldung nur bei Fehlschlag).
 - **Nachrichten:** Verlauf aus `notification_feed()`, ein Panel pro Tag, eine Zeile pro Nachricht, mit Suche und Zustellstatus aus `status_code`.
-- **Server:** aktuelle Messung, Median, P95, Fehlmessungen (24 h), Verlauf als Linie mit roten Ausfällen, Ausfälle als Zeiträume, Tabelle pro Stunde. Aktualisiert sich jede Minute, solange der Tab sichtbar ist.
+- **Server:** je ein Abschnitt für Supabase und Speicher mit aktueller Messung, Median, P95, Fehlmessungen (24 h), Verlauf als Linie mit roten Ausfällen, Ausfälle als Zeiträume, Tabelle pro Stunde. Aktualisiert sich jede Minute, solange der Tab sichtbar ist.
 - **Layout:** Alle Bereiche nutzen die volle Breite mit gleichem Rand und einem Abstand (`--gap`) zwischen allen Panels. Panels einer Zeile sind gleich hoch; Paare (`pair()`) stehen unter 1200 px untereinander. Die Übersicht passt ab 1200 × 600 px ohne Scrollen auf den Bildschirm. Fehlertexte (`errorMessage`) und Zeitangaben (`describeTime`) kommen zentral aus `app.js`. Neu-laden-Knöpfe gibt es nicht, die Seite neu zu laden reicht.
