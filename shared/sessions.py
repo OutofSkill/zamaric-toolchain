@@ -12,7 +12,15 @@ from dataclasses import dataclass
 
 import httpx
 from fastapi import Request
-from supabase import AsyncClient, AsyncClientOptions, AuthApiError, AuthError, AuthRetryableError, acreate_client
+from supabase import (
+    AsyncClient,
+    AsyncClientOptions,
+    AuthApiError,
+    AuthError,
+    AuthRetryableError,
+    AuthUnknownError,
+    acreate_client,
+)
 
 from config import settings
 from errors import ApiError
@@ -160,7 +168,7 @@ async def fresh_client(session: Session) -> AsyncClient:
 async def renewed_auth_session(client: AsyncClient):
     try:
         return await client.auth.get_session()
-    except (AuthRetryableError, httpx.HTTPError, ValueError) as error:
+    except (AuthRetryableError, AuthUnknownError, httpx.HTTPError, ValueError) as error:
         raise ApiError(502, "database_failed", f"Token-Erneuerung: {type(error).__name__}") from None
     except AuthApiError as error:
         if error.status == 429 or error.status >= 500:
