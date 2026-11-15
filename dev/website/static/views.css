@@ -1158,6 +1158,16 @@
 
 /* ---------- Server ---------- */
 
+.srv-section + .srv-section {
+  margin-top: 32px;
+}
+
+.srv-heading {
+  margin: 0 0 12px;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
 .srv-failures {
   color: var(--error);
   font-weight: 600;

@@ -245,11 +245,11 @@ async function loadInto(slot, life, path, render) {
 // Bausteine
 // ---------------------------------------------------------------------------
 
-function panel({ title, actions = null, wide = false, className = "" }, ...children) {
+function panel({ title, actions = null, wide = false, className = "", headingLevel = 2 }, ...children) {
   return h(
     "section",
     { class: `panel${wide ? " view-wide" : ""}${className ? ` ${className}` : ""}` },
-    h("div", { class: "panel-head" }, h("h2", {}, title), actions ? h("div", { class: "view-panel-actions" }, actions) : null),
+    h("div", { class: "panel-head" }, h(`h${headingLevel}`, {}, title), actions ? h("div", { class: "view-panel-actions" }, actions) : null),
     ...children,
   );
 }
@@ -1800,7 +1800,7 @@ function percentile(sortedValues, fraction) {
   return sortedValues[index];
 }
 
-function latencyChart(samples, intervalSeconds, life) {
+function latencyChart(samples, intervalSeconds, life, name) {
   const frame = h("div", { class: "viz-frame" });
   const chartSlot = h("div", {});
   frame.append(chartSlot);
@@ -1902,7 +1902,7 @@ function latencyChart(samples, intervalSeconds, life) {
       height: plotHeight,
       tabindex: "0",
       role: "img",
-      "aria-label": `Antwortzeit von Supabase der letzten 24 Stunden, ${points.length} Messungen, ${outages.length} Ausfälle. Pfeiltasten wählen eine Messung.`,
+      "aria-label": `Antwortzeit von ${name} der letzten 24 Stunden, ${points.length} Messungen, ${outages.length} Ausfälle. Pfeiltasten wählen eine Messung.`,
     });
     fill(
       chartSlot,
@@ -2007,10 +2007,14 @@ export function renderServer(container, { signal } = {}) {
   function drawLatency(data) {
     chartLife?.dispose();
     chartLife = lifecycle();
-    const samples = data?.samples ?? [];
     const interval = data?.interval_seconds ?? 60;
+    return [latencySection("Supabase", data?.samples ?? [], interval), latencySection("Speicher", data?.storage_samples ?? [], interval)];
+  }
+
+  function latencySection(name, samples, interval) {
+    const heading = h("h2", { class: "srv-heading" }, name);
     if (!samples.length) {
-      return emptyView("Noch keine Messungen", null);
+      return h("section", { class: "srv-section" }, heading, emptyView("Noch keine Messungen", null));
     }
     const okValues = samples.filter((sample) => sample.ok && sample.ms != null).map((sample) => sample.ms).sort((a, b) => a - b);
     const failures = samples.filter((sample) => !sample.ok);
@@ -2027,7 +2031,7 @@ export function renderServer(container, { signal } = {}) {
       tile("Fehlmessungen", h("span", {}, numberFormat.format(failures.length), h("small", { class: "muted" }, percentFormat.format(failureRate)))),
     ]);
     const outages = outageRanges(failures, interval);
-    const chart = latencyChart(samples, interval, chartLife);
+    const chart = latencyChart(samples, interval, chartLife, name);
 
     // Stundenweise Zusammenfassung als Tabellenansicht des Diagramms
     const hours = new Map();
@@ -2056,12 +2060,12 @@ export function renderServer(container, { signal } = {}) {
         );
       });
 
-    return h(
+    const grid = h(
       "div",
       { class: "grid" },
       h("div", { class: "view-wide" }, tiles),
       panel(
-        { title: "Antwortzeit (24 h)", wide: true },
+        { title: "Antwortzeit (24 h)", wide: true, headingLevel: 3 },
         chart.element,
         h(
           "details",
@@ -2072,7 +2076,7 @@ export function renderServer(container, { signal } = {}) {
       ),
       outages.length
         ? panel(
-            { title: "Ausfälle", wide: true },
+            { title: "Ausfälle", wide: true, headingLevel: 3 },
             h(
               "ol",
               { class: "srv-outages" },
@@ -2092,6 +2096,7 @@ export function renderServer(container, { signal } = {}) {
           )
         : null,
     );
+    return h("section", { class: "srv-section" }, heading, grid);
   }
 
   refresh();

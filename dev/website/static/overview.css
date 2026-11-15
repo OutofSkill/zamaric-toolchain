@@ -62,7 +62,7 @@
 
 .ov-status {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   margin: 0;
   padding: 0;
   list-style: none;
@@ -660,6 +660,10 @@
 
   .ov-status-item:nth-child(n + 3) {
     border-top: 1px solid var(--line);
+  }
+
+  .ov-status-item:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
 }
 

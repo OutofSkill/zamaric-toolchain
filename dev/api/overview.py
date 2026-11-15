@@ -86,7 +86,14 @@ def down_since(samples: list[dict]) -> str | None:
 
 
 async def latency_summary() -> dict:
-    samples = list(monitor.samples)
+    return summarize_samples(list(monitor.samples))
+
+
+async def storage_latency_summary() -> dict:
+    return summarize_samples(list(monitor.storage_samples))
+
+
+def summarize_samples(samples: list[dict]) -> dict:
     reachable = [sample["ms"] for sample in samples if sample["ok"] and sample["ms"] is not None]
     return {
         "last": samples[-1] if samples else None,
@@ -208,9 +215,21 @@ async def get_overview(session: Session = Depends(existing_session)) -> dict:
             return asyncio.sleep(0, {"error": "database_failed"})
         return part(name, lambda: load(client))
 
-    names = ("latency", "ci", "integrity", "cron", "content", "repo", "releases", "storage", "notifications")
+    names = (
+        "latency",
+        "storage_latency",
+        "ci",
+        "integrity",
+        "cron",
+        "content",
+        "repo",
+        "releases",
+        "storage",
+        "notifications",
+    )
     results = await asyncio.gather(
         part("latency", latency_summary),
+        part("storage_latency", storage_latency_summary),
         part("ci", ci_summary),
         supabase_part("integrity", lambda client: cached_part("integrity", lambda: integrity_summary(client))),
         supabase_part("cron", cron_summary),

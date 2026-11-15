@@ -581,7 +581,8 @@ textarea {
 }
 
 /* Gleiche Titelgröße wie die Kacheln der Übersicht */
-.panel-head h2 {
+.panel-head h2,
+.panel-head h3 {
   font-size: 0.94rem;
 }
 

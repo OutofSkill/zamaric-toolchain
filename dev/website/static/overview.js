@@ -134,15 +134,24 @@ function statusItem({ key, href, label, kind, value, detail }) {
         "span",
         { class: "ov-status-text" },
         h("span", { class: "ov-status-label" }, label, h("span", { class: "ov-hidden" }, `: ${statusWords[kind] ?? ""}`)),
-        h("span", { class: "ov-status-value" }, value),
-        detail ? h("span", { class: "ov-status-detail muted", title: key === "supabase" ? `${detail} (letzte 24 h)` : detail }, detail) : null,
+        h("span", { class: "ov-status-value", title: typeof value === "string" ? value : null }, value),
+        detail ? h("span", { class: "ov-status-detail muted", title: latencyKeys.has(key) ? `${detail} (letzte 24 h)` : detail }, detail) : null,
       ),
     ),
   );
 }
 
+const latencyKeys = new Set(["supabase", "storage"]);
+
 function supabaseStatus(part) {
-  const base = { key: "supabase", href: "#server", label: "Supabase" };
+  return latencyStatus(part, { key: "supabase", href: "#server", label: "Supabase" });
+}
+
+function storageStatus(part) {
+  return latencyStatus(part, { key: "storage", href: "#server", label: "Speicher" });
+}
+
+function latencyStatus(part, base) {
   const error = partError(part);
   if (error) return { ...base, kind: "muted", value: "unbekannt", detail: errorMessage(error) };
   const data = partData(part);
@@ -212,7 +221,13 @@ function statusStrip(data) {
   return h(
     "ul",
     { class: "ov-status", "aria-label": "Status" },
-    [supabaseStatus(data.latency), githubStatus(data.ci), integrityStatus(data.integrity), cronStatus(data.cron)].map(statusItem),
+    [
+      supabaseStatus(data.latency),
+      storageStatus(data.storage_latency),
+      githubStatus(data.ci),
+      integrityStatus(data.integrity),
+      cronStatus(data.cron),
+    ].map(statusItem),
   );
 }
 

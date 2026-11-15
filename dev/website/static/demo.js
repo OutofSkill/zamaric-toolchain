@@ -464,21 +464,41 @@ function notificationsResponse() {
   };
 }
 
-function latencyResponse() {
-  const next = random(Math.floor(now / minute));
+function latencySamples(seed, base, outageStart, singles) {
+  const next = random(seed);
   const samples = [];
   const end = Math.floor(now / minute) * minute;
   for (let index = 1439; index >= 0; index -= 1) {
     const time = end - index * minute;
     const hourOfDay = new Date(time).getHours();
-    const outage = index >= 410 && index < 416;
-    const single = index === 1100 || index === 87;
+    const outage = index >= outageStart && index < outageStart + 6;
+    const single = singles.includes(index);
     const ok = !(outage || single);
     const busy = hourOfDay >= 18 && hourOfDay <= 22 ? 30 : 0;
     const spike = next() < 0.02 ? 300 + next() * 900 : 0;
-    samples.push({ at: iso(time), ms: ok ? Math.round(78 + busy + next() * 45 + spike) : null, ok });
+    samples.push({ at: iso(time), ms: ok ? Math.round(base + busy + next() * 45 + spike) : null, ok });
   }
-  return { interval_seconds: 60, samples };
+  return samples;
+}
+
+function latencyResponse() {
+  const seed = Math.floor(now / minute);
+  return {
+    interval_seconds: 60,
+    samples: latencySamples(seed, 78, 410, [1100, 87]),
+    storage_samples: latencySamples(seed + 1, 52, 900, [300]),
+  };
+}
+
+function latencySummary(samples) {
+  const okValues = samples.filter((sample) => sample.ok).map((sample) => sample.ms).sort((a, b) => a - b);
+  return {
+    last: samples.at(-1) ?? null,
+    median_ms: okValues.length ? okValues[Math.ceil(okValues.length / 2) - 1] : null,
+    failures: samples.filter((sample) => !sample.ok).length,
+    samples: samples.length,
+    down_since: null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -486,8 +506,7 @@ function latencyResponse() {
 // ---------------------------------------------------------------------------
 
 function overviewResponse() {
-  const samples = latencyResponse().samples;
-  const okValues = samples.filter((sample) => sample.ok).map((sample) => sample.ms).sort((a, b) => a - b);
+  const latency = latencyResponse();
   const ci = ciResponse();
   const findings = integrity().findings;
   const cronRuns = cronResponse().runs;
@@ -497,15 +516,8 @@ function overviewResponse() {
   const dayAgo = now - day;
   return {
     generated_at: iso(Date.now()),
-    latency: {
-      data: {
-        last: samples.at(-1) ?? null,
-        median_ms: okValues.length ? okValues[Math.ceil(okValues.length / 2) - 1] : null,
-        failures: samples.filter((sample) => !sample.ok).length,
-        samples: samples.length,
-        down_since: null,
-      },
-    },
+    latency: { data: latencySummary(latency.samples) },
+    storage_latency: { data: latencySummary(latency.storage_samples) },
     ci: { data: { configured: ci.configured, workflow: "analyze.yml", latest: ci.runs[0] ?? null } },
     integrity: {
       data: {
