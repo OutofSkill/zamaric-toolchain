@@ -62,6 +62,7 @@ const groupTitles = {
   ambiguous_type_instrument: "Instrument im Zusatz ungenau",
   letter_time_differs_between_variants: "Buchstabe zeitlich verschoben",
   letters_differ_between_variants: "Buchstaben anders als im Vergleichs-Playback",
+  count_in_tempo_mismatch: "Einzähler passt nicht zum Tempo",
   first_letter_not_at_start: "Erster Buchstabe nicht bei 0:00",
 };
 
@@ -3340,7 +3341,7 @@ function doneText(upload, songName) {
   if (!upload.updating) return `„${songName}“ erscheint am ${formatReleaseDay(upload.releaseDay)} in der App.`;
   if (!upload.rowsChanged) return `Verlag und Link von „${songName}“ sind geändert und gelten sofort.`;
   if (!upload.releaseAt) return `Die Änderungen an „${songName}“ sind gespeichert.`;
-  if (songWaitingForRelease()) return `Die Änderungen gelten sofort. „${songName}“ erscheint wie geplant am ${formatReleaseMoment(upload.releaseAt)} in der App.`;
+  if (songWaitingForRelease()) return `Die Änderungen gelten sofort. „${songName}“ erscheint am ${formatReleaseMoment(upload.releaseAt)} in der App.`;
   return `Die Änderungen an „${songName}“ erscheinen am ${formatReleaseMoment(upload.releaseAt)} in der App. Bis dahin bleibt der alte Stand sichtbar.`;
 }
 
@@ -3352,7 +3353,7 @@ function waitingSongRelease() {
     h(
       "p",
       { class: "muted" },
-      `„${state.songName}“ wartet noch auf seine Freigabe am ${formatReleaseMoment(parseTimestamp(state.update.existing.release_at))}. Die Änderungen gelten deshalb sofort.`,
+      `„${state.songName}“ wartet noch auf seine Freigabe am ${formatReleaseMoment(parseTimestamp(state.update.existing.release_at))}. Die Änderungen gelten deshalb sofort. Ändern sich Noten, Playbacks oder Einzähler, rückt die Freigabe auf frühestens 24 Stunden danach, ein späterer Termin bleibt.`,
     ),
   );
 }

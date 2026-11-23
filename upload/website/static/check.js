@@ -9,6 +9,8 @@ const defaultType = "Normal";
 const jumpMarks = new Set(["D.S.", "D.C."]);
 const variantModifierPattern = /^(ohne Drums|lauter)?(_?langsamer)?$/i;
 const withoutDrumsPattern = /ohne drums/i;
+const slowTempoPattern = /langsam/i;
+const slowTempoSuffixPattern = /[\s_-]*langsam(er)?/gi;
 const drumInstrumentPrefix = "drum";
 const minimumFamilySuffixLength = 5;
 const preferredFamilyPrefix = "alt";
@@ -22,6 +24,7 @@ export function hasInvisible(text) {
 export const warningOrder = [
   "letters_differ_between_variants",
   "letter_time_differs_between_variants",
+  "count_in_tempo_mismatch",
   "missing_timestamps",
   "part_without_viewers",
   "missing_separator",
@@ -614,6 +617,32 @@ export async function checkSong({
     if (!isModifier(type.slice(index + 3))) return fold(type);
     return instrumentNameKeys.has(fold(head)) ? fold(defaultType) : variantGroup(head);
   };
+  const countInTempoKey = (name) => fold(name).replace(slowTempoSuffixPattern, "").trim();
+  const checkCountInTempo = (type, path, letters) => {
+    const slow = slowTempoPattern.test(type);
+    const mismatches = new Map();
+    for (const letter of letters) {
+      const countIn = countIns.get(fold(letter.count_in));
+      if (!countIn || slowTempoPattern.test(countIn.name) === slow) continue;
+      const counterpart = [...countIns.values()].find(
+        (candidate) =>
+          slowTempoPattern.test(candidate.name) === slow && countInTempoKey(candidate.name) === countInTempoKey(countIn.name),
+      );
+      if (!counterpart) continue;
+      const key = fold(countIn.name);
+      if (!mismatches.has(key)) mismatches.set(key, { used: countIn.name, expected: counterpart.name, letters: [] });
+      mismatches.get(key).letters.push(letter);
+    }
+    for (const { used, expected, letters: affected } of mismatches.values()) {
+      const names = affected.map((letter) => `„${letter.name}“`).join(", ");
+      warning(
+        "count_in_tempo_mismatch",
+        path,
+        `${slow ? "Langsames" : "Normales"} Playback mit Einzähler „${used}“ bei ${names}, gemeint „${expected}“?`,
+        { line: affected[0].line },
+      );
+    }
+  };
   const typeInstrumentIds = (type) => {
     const segmentKeys = new Set(type.split(" - ").map(fold));
     const withoutDrums = withoutDrumsPattern.test(type);
@@ -765,6 +794,7 @@ export async function checkSong({
     if (letters.length > 0 && letters[0].position_ms !== 0) {
       warning("first_letter_not_at_start", txtPath, `„${letters[0].name}“ beginnt nicht bei 0:00`, { line: letters[0].line });
     }
+    checkCountInTempo(playback.type, txtPath, letters);
     if (!usable) continue;
     playbacks.push({
       path: entry.original,
