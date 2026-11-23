@@ -628,9 +628,9 @@ export async function checkSong({
         (candidate) =>
           slowTempoPattern.test(candidate.name) === slow && countInTempoKey(candidate.name) === countInTempoKey(countIn.name),
       );
-      if (!counterpart) continue;
+      if (!counterpart && slow) continue;
       const key = fold(countIn.name);
-      if (!mismatches.has(key)) mismatches.set(key, { used: countIn.name, expected: counterpart.name, letters: [] });
+      if (!mismatches.has(key)) mismatches.set(key, { used: countIn.name, expected: counterpart?.name ?? null, letters: [] });
       mismatches.get(key).letters.push(letter);
     }
     for (const { used, expected, letters: affected } of mismatches.values()) {
@@ -638,7 +638,9 @@ export async function checkSong({
       warning(
         "count_in_tempo_mismatch",
         path,
-        `${slow ? "Langsames" : "Normales"} Playback mit Einzähler „${used}“ bei ${names}, gemeint „${expected}“?`,
+        expected === null
+          ? `Normales Playback mit langsamem Einzähler „${used}“ bei ${names}`
+          : `${slow ? "Langsames" : "Normales"} Playback mit Einzähler „${used}“ bei ${names}, gemeint „${expected}“?`,
         { line: affected[0].line },
       );
     }
