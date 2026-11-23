@@ -426,7 +426,7 @@ Aufbau wie [POST /api/upload](#post-apiupload) (`manifest`, `paths`, `files`), a
 - Listen dürfen leer sein, wenn sich nur Verlag oder Link ändern.
 - Container 2 prüft wie beim Upload (Schritte 2 bis 6: gleiche Regeln je Eintrag, Einmaligkeit innerhalb der Listen, Dateien messen, hashen, hochladen) und ruft dann `update_song` (siehe README von `zamaric-database` → „`update_song`“) auf. Ob die Einzähler der Buchstaben existieren, prüft `update_song`, weil sie auch zu unveränderten Einzählern gehören können. Danach räumt er auf wie in Schritt 9.
 
-**Antwort** `201` mit dem Zeitpunkt, ab dem die Änderung sichtbar ist (bei einem Song, der noch wartet: dessen Freigabe):
+**Antwort** `201` mit dem Zeitpunkt, ab dem die Änderung sichtbar ist (bei einem Song, der noch wartet: dessen neue Freigabe):
 
 ```json
 { "release_at": "2026-11-03T03:00:00+00:00" }
@@ -440,7 +440,7 @@ Fehler wie bei `POST /api/upload`, ohne `409`.
 2. Die Website lädt den Stand über `GET /api/songs/{id}`, belegt Verlag, Link und die Sichtbarkeit der vorhandenen Playbacks damit vor und rechnet die Prüfsummen der Dateien im Ordner.
 3. Jede Datei bekommt eine Markierung: **neu**, **geändert** (mit Grund: PDF, MP3, Buchstaben, Sichtbar für, Schreibweise) oder **unverändert**. Was in der DB steht, aber nicht im Ordner, listet die Website unter „… nicht im Ordner, bleiben unverändert“. Gelöscht wird nichts.
 4. Hochgeladen werden nur neue und geänderte Dateien. Ohne jede Änderung lässt sich nichts hochladen.
-5. Freigabe wie bei neuen Songs (frühestmöglich oder an einem bestimmten Tag). Wartet der Song selbst noch, entfällt die Auswahl, weil Änderungen dann sofort gelten.
+5. Freigabe wie bei neuen Songs (frühestmöglich oder an einem bestimmten Tag). Wartet der Song selbst noch, entfällt die Auswahl, weil Änderungen dann sofort gelten. Ändern sich dabei Noten, Playbacks oder Einzähler, rückt seine Freigabe auf den ersten 4-Uhr-Termin mindestens 24 Stunden nach der Änderung, ein späterer Termin bleibt.
 
 ### Song-Ordner
 
@@ -539,6 +539,7 @@ Meldungen zu einer Datei stehen direkt bei der Datei in der Liste. Nur Meldungen
 | `unused_count_in` | ⛔ | Datei in `Einzaehler/` wird von keiner `.txt` benutzt |
 | `letters_differ_between_variants` | ⚠️ | Buchstabenfolge weicht innerhalb einer Variantengruppe ab. Bei höchstens 2 Unterschieden nennt die Meldung die fehlenden und zusätzlichen Buchstaben, sonst beide Folgen. Gruppe `Normal` = `Normal`, `langsamer`, `ohne Drums`, `<Instrument> - lauter` und Kombinationen; Gruppe `Part A` = `Part A`, `Part A - ohne Drums` usw. Verglichen wird mit dem Playback, das wie die Gruppe heißt. `SoloPart`, `Begleitung` usw. stehen allein |
 | `letter_time_differs_between_variants` | ⚠️ | Gleiche Buchstabenfolge, aber ein einzelner Buchstabe liegt mehr als 3 s neben der Stelle, die sich aus seinen beiden Nachbarn und dem Tempo-Verhältnis zur Referenz ergibt. Erster und letzter Buchstabe werden nicht geprüft; gleichmäßige Tempo-Abweichungen lösen nichts aus |
+| `count_in_tempo_mismatch` | ⚠️ | Ein Playback mit `langsam` im `type` benutzt einen Einzähler ohne `langsam`, obwohl es denselben Einzähler mit `langsam` gibt (`3-4` statt `3-4langsamer`), oder umgekehrt. Eine Meldung je `.txt` und Einzähler, mit allen betroffenen Buchstaben |
 | `unknown_type_instrument` | ⚠️ | Ein Teil des `type` (zwischen ` - `) ähnelt einem Instrument (Ähnlichkeit ≥ 0,8), ist aber keins |
 | `ambiguous_type_instrument` | ⛔ | Ein Teil des `type` ist das gemeinsame Wortende mehrerer Instrumente (mindestens 5 Buchstaben, selbst kein Instrument) oder ähnelt ihm (≥ 0,8), z. B. `Saxophon`/`Saxaphon` für Alt-, Tenor-, Bariton- und Sopransaxophon. Die Familien ergeben sich aus der Instrumententabelle |
 | `first_letter_not_at_start` | ⚠️ | Erster Buchstabe liegt nicht bei `00:00:00` |
