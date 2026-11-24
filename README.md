@@ -38,7 +38,8 @@ Verwandte Repos:
 zamaric-toolchain/
 ├── upload/                   Upload-Tool (Website, Container, siehe unten)
 ├── dev/                      Entwicklerseite (Website, Container, siehe unten)
-└── shared/                   gemeinsamer Python-Code für Login, Sessions, Fehler, Prüfsummen,
+└── shared/                   gemeinsamer Code: Python für Login, Sessions, Fehler, Prüfsummen sowie
+                              content_rules.js (Inhaltsregeln für Upload-Tool und Entwicklerseite),
                               eingebunden über additional_contexts in den docker-compose-Dateien
 ```
 
@@ -92,18 +93,22 @@ upload/
 │   └── Dockerfile                kopiert zusätzlich shared/*.py dazu
 ├── website/                      Container 1 (nginx)
 │   ├── static/                   die Website
+│   │   ├── content_rules.js      Symlink auf shared/content_rules.js (für ?demo lokal und die Tests)
 │   │   └── vendor/sha256.min.js  js-sha256 1.0.0 (MIT), Prüfsummen im Browser
+│   ├── tests/                    Tests für check.js und shared/content_rules.js (node --test)
 │   ├── nginx.conf
 │   ├── security_headers.conf
-│   └── Dockerfile
+│   ├── .dockerignore             hält Symlink, Tests und static/.claude aus dem Build-Kontext
+│   └── Dockerfile                kopiert zusätzlich shared/content_rules.js dazu
 ├── docker-compose.yml            alle drei Container (NetBird, website, api)
 └── .env.example                  Vorlage für die eigene .env (nicht im Repo)
 ```
 
-**Gemeinsamer Code.** Login, Sessions und Fehlerbehandlung teilen sich Upload-Tool und [Entwicklerseite](#entwicklerseite). Sie liegen in `shared/`. Beim Bauen holt die Compose-Datei den Ordner als zweiten Build-Kontext dazu (`additional_contexts: { shared: ../shared }`), das Dockerfile kopiert ihn mit `COPY --from=shared *.py ./` neben den eigenen Code. Im Container liegt also alles flach in `/app`. Braucht Docker Compose ≥ 2.17.
+**Gemeinsamer Code.** Login, Sessions und Fehlerbehandlung teilen sich Upload-Tool und [Entwicklerseite](#entwicklerseite). Sie liegen in `shared/`. Beim Bauen holt die Compose-Datei den Ordner als zweiten Build-Kontext dazu (`additional_contexts: { shared: ../shared }`), das Dockerfile kopiert ihn mit `COPY --from=shared *.py ./` neben den eigenen Code. Im Container liegt also alles flach in `/app`. Braucht Docker Compose ≥ 2.17. Die Inhaltsregeln (`content_rules.js`) teilen sich die beiden Websites: Ihre Compose-Dienste `website` holen `shared/` genauso dazu, ihre Dockerfiles kopieren nur diese Datei mit `COPY --from=shared content_rules.js /usr/share/nginx/html/` neben `check.js`. Gebaut wird deshalb immer über `docker compose`, ein einzelnes `docker build` kennt den Kontext `shared` nicht.
 
 | Datei | Inhalt |
 |---|---|
+| `content_rules.js` | JavaScript für die Websites: Ähnlichkeit, Familien, Variantengruppen und Buchstabenvergleich, Einzähler-Tempo, Instrumente im Zusatz, doppelte und erste Buchstaben. Reine Funktionen ohne DOM, liefern Funde mit Text; Pfad und Meldungscode setzt der Aufrufer (`check.js`, später die Inhaltsprüfung der Entwicklerseite) |
 | `web.py` | `create_app()`: FastAPI ohne `/docs`, alle Fehler-Handler, `require_own_origin`, `POST /api/login`, `POST /api/logout`, `GET /api/session` |
 | `sessions.py` | Login, Sessions, Login-Sperre, Token-Erneuerung (`fresh_client`). Liest `config.settings` des jeweiligen Tools |
 | `errors.py` | `ApiError`: Fehler mit festem Code für den Browser |
@@ -481,7 +486,7 @@ Gilt für jeden Datei- und Ordnernamen und jeden Zeileninhalt, bevor irgendetwas
 
 ### Prüfregeln
 
-Laufen in der Website (`static/check.js`). ⛔ = Fehler, blockiert den Upload · ⚠️ = Warnung, der Partner muss sie bestätigen
+Laufen in der Website (`static/check.js`). Die Regeln, die nicht an Ordnern und Dateinamen hängen (Varianten, Buchstabenvergleich, Einzähler-Tempo, Instrumente im Zusatz, doppelte Buchstaben, erster Buchstabe), liegen in `shared/content_rules.js`, damit die Entwicklerseite dieselben Regeln nachträglich auf DB und Buckets anwenden kann. ⛔ = Fehler, blockiert den Upload · ⚠️ = Warnung, der Partner muss sie bestätigen
 
 Meldungen zu einer Datei stehen direkt bei der Datei in der Liste. Nur Meldungen ohne passende Zeile (Song, Ordner, Dateien an falscher Stelle) zeigt die Website als Kartenstapel „Allgemein“: erst alle Fehler, dann die Warnungen in der Reihenfolge von `warningOrder`. Gleiche Meldungen ab 4 Stück werden zu einer Karte zusammengefasst, bei Warnungen nur die aus `groupableWarnings`. Die übrigen Warnungen muss der Partner einzeln bestätigen. Der Überblick sammelt alle offenen Punkte vor dem Hochladen-Knopf.
 
@@ -568,7 +573,7 @@ Zu manchen Meldungen schlägt die Prüfung einen korrigierten Dateinamen vor, nu
 
 #### Tests
 
-`upload/website/tests/` hält das Verhalten von `check.js` fest: Meldungen mit Code, Schwere, Pfad, Zeile und Text sowie das Ergebnis für einen sauberen Ordner. Die Eingaben sind nachgebaut (Dateien, Nachschlagedaten, `inspect` mit festen MP3-Längen, PDF-Ergebnissen und TXT-Inhalten). Der Ordner liegt bewusst außerhalb von `static/`, damit er nicht im nginx-Image landet. Braucht nur Node, keine Pakete. Im Repo-Ordner:
+`upload/website/tests/` hält das Verhalten von `check.js` fest: Meldungen mit Code, Schwere, Pfad, Zeile und Text sowie das Ergebnis für einen sauberen Ordner. Die reinen Funktionen aus `shared/content_rules.js` testet `content_rules.test.js` zusätzlich direkt. Die Eingaben sind nachgebaut (Dateien, Nachschlagedaten, `inspect` mit festen MP3-Längen, PDF-Ergebnissen und TXT-Inhalten). Der Ordner liegt bewusst außerhalb von `static/`, damit er nicht im nginx-Image landet. Braucht nur Node, keine Pakete. Im Repo-Ordner:
 
 ```bash
 node --test upload/website/tests/
@@ -658,6 +663,7 @@ dev/
 │   │   ├── style.css             Tokens, Gerüst, gemeinsame Klassen, Board
 │   │   ├── views.css             Bereiche aus views.js
 │   │   ├── overview.css          Übersicht (Präfix ov-)
+│   │   ├── content_rules.js      Symlink auf shared/content_rules.js (Vorbereitung für die Inhaltsprüfung, lokal über ?demo)
 │   │   ├── fonts/Figtree.ttf
 │   │   └── vendor/
 │   │       ├── sortable.esm.js   SortableJS 1.15.6 (MIT), Drag & Drop
@@ -665,7 +671,8 @@ dev/
 │   │       └── purify.es.js      DOMPurify 3.2.6 (Apache-2.0 / MPL-2.0), HTML bereinigen
 │   ├── nginx.conf
 │   ├── security_headers.conf
-│   └── Dockerfile
+│   ├── .dockerignore             hält Symlink und static/.claude aus dem Build-Kontext
+│   └── Dockerfile                kopiert zusätzlich shared/content_rules.js dazu
 ├── docker-compose.yml            alle drei Container (NetBird, website, api)
 └── .env.example                  Vorlage für die eigene .env (nicht im Repo)
 ```
