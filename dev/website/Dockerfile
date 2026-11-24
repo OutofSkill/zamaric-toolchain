@@ -5,3 +5,4 @@ COPY security_headers.conf /etc/nginx/security_headers.conf
 
 # Nur der Inhalt von static/ kommt ins Image, nie der Rest des Projekts
 COPY static/ /usr/share/nginx/html/
+COPY --from=shared content_rules.js /usr/share/nginx/html/

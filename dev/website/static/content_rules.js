@@ -1,0 +1,1 @@
+../../../shared/content_rules.js
