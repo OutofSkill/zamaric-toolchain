@@ -370,6 +370,7 @@ function integrity() {
       { check_name: "count_in_unused", severity: "warning", table_name: "count_in", row_id: 91, song_id: 18, song_name: "Bolero Brass", detail: "Einzähler H" },
       { check_name: "display_without_effect", severity: "warning", table_name: "playback", row_id: 27, song_id: 27, song_name: "Polka Nr. 3", detail: "Playback Normal" },
       { check_name: "category_empty", severity: "warning", table_name: "category", row_id: 6, song_id: null, song_name: null, detail: "Weihnachten" },
+      { check_name: "whitespace_in_name", severity: "warning", table_name: "playback", row_id: 58, song_id: 12, song_name: "Tequila", detail: "Playback „ohne  Drums“" },
     ],
   };
 }

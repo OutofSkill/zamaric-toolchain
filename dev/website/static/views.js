@@ -92,6 +92,26 @@ const integrityChecks = {
   category_empty: {
     title: "Leere Kategorie",
   },
+  song_without_content: {
+    title: "Song ohne Inhalt",
+    text: "Weder Playbacks noch Noten, auch keine wartenden.",
+  },
+  duplicate_name_normalized: {
+    title: "Name doppelt",
+    text: "Gleich nach Unicode-Normalisierung, z. B. „ü“ in zwei Schreibweisen.",
+  },
+  name_not_normalized: {
+    title: "Name nicht normalisiert",
+    text: "Nicht in Unicode-Form NFC gespeichert.",
+  },
+  whitespace_in_name: {
+    title: "Auffällige Leerzeichen",
+    text: "Doppelte oder besondere Leerzeichen (z. B. geschütztes).",
+  },
+  default_level_missing: {
+    title: "Level „Normal“ fehlt",
+    text: "Die App erkennt Noten nur mit genau dieser Schreibweise als Normal.",
+  },
 };
 
 const tableNames = {
@@ -102,6 +122,7 @@ const tableNames = {
   letter: "Buchstabe",
   display_playback: "Sichtbarkeit",
   category: "Kategorie",
+  level: "Level",
 };
 
 const timeFormat = new Intl.DateTimeFormat("de-DE", { hour: "2-digit", minute: "2-digit" });
