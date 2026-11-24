@@ -566,6 +566,14 @@ Zu manchen Meldungen schlägt die Prüfung einen korrigierten Dateinamen vor, nu
 | `ambiguous_type_instrument` | die `Alt`-Variante der Familie (`Part B - Saxaphon` → `Part B - Altsaxophon`), bei MP3 und `.txt`. Gibt es keine, nur die Meldung |
 | `orphan_timestamps` | `.txt` der ähnlichsten MP3 ohne `.txt` zugeordnet (`ohne Dums` → `ohne Drums`) |
 
+#### Tests
+
+`upload/website/tests/` hält das Verhalten von `check.js` fest: Meldungen mit Code, Schwere, Pfad, Zeile und Text sowie das Ergebnis für einen sauberen Ordner. Die Eingaben sind nachgebaut (Dateien, Nachschlagedaten, `inspect` mit festen MP3-Längen, PDF-Ergebnissen und TXT-Inhalten). Der Ordner liegt bewusst außerhalb von `static/`, damit er nicht im nginx-Image landet. Braucht nur Node, keine Pakete. Im Repo-Ordner:
+
+```bash
+node --test upload/website/tests/
+```
+
 ### Angefangener Upload
 
 Die Website merkt sich einen angefangenen Upload im Browser (`localStorage`, Schlüssel `zamaric-upload-draft`), damit nach einem Neuladen oder abgelaufener Anmeldung nichts verloren geht (`upload/website/static/app.js`, `saveDraft`).
@@ -867,6 +875,11 @@ Navigation über den Hash (`#overview` als Start, `#board`, `#repo`, `#database`
     | `invalid_duration` | error | `duration_ms` ≤ 0 |
     | `display_without_effect` | warning | `display_playback`-Zeilen bei `instrument_mode` `all` |
     | `category_empty` | warning | Kategorie ohne Songs |
+    | `song_without_content` | error | Song (sichtbar oder wartend) ganz ohne Playback- und Noten-Zeilen |
+    | `duplicate_name_normalized` | error | Songs einer Kategorie, Playback-Typen oder Einzähler-Namen eines Songs (sichtbare und wartende Zeilen, außer eine ersetzt die andere), die erst nach Unicode-Normalisierung (NFC) gleich sind, z. B. „ü“ als ein Zeichen und als „u“ mit Trema |
+    | `name_not_normalized` | warning | Songname, Verlag, Playback-Typ oder Einzähler-Name nicht in Unicode-Form NFC |
+    | `whitespace_in_name` | warning | dieselben Namen mit doppelten Leerzeichen oder einem anderen Leerzeichen als dem normalen (z. B. geschütztes Leerzeichen), wie `whitespace_issue` beim Upload |
+    | `default_level_missing` | error | In `level` fehlt „Normal“ in genau dieser Schreibweise (die App vergleicht exakt) |
   - **Prüfsummen:** Knopf „Prüfsummen nachtragen“ im Kopf der Integrität, Fortschritt alle 1,5 s („12 / 42“). Ein Netzfehler wird nach 5 s erneut versucht, nach 3 Fehlern in Folge steht „Erneut versuchen“ da. Am Ende laden Integrität und Dateien neu.
   - **Prüfsummen prüfen:** eigenes Panel unter der Integrität mit Knopf „Prüfsummen prüfen“, Fortschritt wie beim Nachtragen (gleicher Code, `backgroundJob` in `views.js`). Danach: „Alle stimmen“, „Nicht vollständig geprüft“ oder die Zahl der Abweichungen, dazu geprüft / nicht abrufbar / ohne Prüfsumme und der Zeitpunkt, darunter die Abweichungen als Tabelle. Das letzte Ergebnis steht auch nach dem Neuladen der Seite da.
   - **Unbenutzte Dateien** (`unused_files(files)`), Knopf „Löschen“ mit Rückfrage, danach laden Dateien, Speicher und Integrität neu. Fehlende Dateien stehen nur in der Integrität (`file_missing`).
