@@ -79,6 +79,18 @@ SCHEMA_STEPS = [
     );
     create index board_card_column_id_position_index on board_card (column_id, position);
     """,
+    """
+    create table hidden_finding (
+        key text primary key check (length(key) = 64),
+        check_name text not null check (length(check_name) between 1 and 64),
+        hidden_at text not null
+    );
+    create table file_check_result (
+        check_name text primary key check (length(check_name) between 1 and 64),
+        result text not null check (json_valid(result)),
+        finished_at text not null
+    );
+    """,
 ]
 SCHEMA_VERSION = len(SCHEMA_STEPS)
 

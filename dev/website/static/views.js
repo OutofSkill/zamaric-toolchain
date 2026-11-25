@@ -4,17 +4,19 @@
 // gibt sie eine Aufräumfunktion zurück, die dasselbe tut.
 
 import { h, request, formatDate, formatBytes, renderMarkdown, confirmDialog, errorMessage, describeTime } from "./app.js";
+import { contentCheckNames, evaluateContent, findingKey } from "./content_checks.js";
 
 const svgNamespace = "http://www.w3.org/2000/svg";
 const checksumPollMs = 1500;
 const checksumRetryMs = 5000;
 const checksumMaxFailures = 3;
-const verificationAbortReasons = {
+const fileCheckAbortReasons = {
   session_ended: "Session vorbei",
   unauthorized: "Anmeldung abgelaufen",
   forbidden: "kein Admin",
   database_failed: "Supabase nicht erreichbar",
   storage_failed: "Speicher nicht erreichbar",
+  cancelled: "Container beendet",
   unexpected: "unerwarteter Fehler, siehe Log",
 };
 const unusedHint = "Nur Upload-Tool-Dateien, älter als 1 Std.";
@@ -114,6 +116,69 @@ const integrityChecks = {
   },
 };
 
+const contentChecks = {
+  ambiguous_type_instrument: {
+    title: "Mehrdeutiges Instrument im Zusatz",
+    text: "Familie statt genaues Instrument, z. B. „Saxophon“.",
+  },
+  duplicate_letter: {
+    title: "Buchstabe doppelt",
+    text: "Ohne D.S. oder D.C. dazwischen.",
+  },
+  unknown_type_instrument: {
+    title: "Tippfehler im Zusatz",
+    text: "Ähnlich wie ein Instrument, aber nicht gleich.",
+  },
+  visibility_differs_from_type: {
+    title: "Sichtbarkeit passt nicht zum Zusatz",
+    text: "Ein Instrument aus dem Zusatz sieht das Playback nicht.",
+  },
+  playback_without_letters: {
+    title: "Playback ohne Buchstaben",
+  },
+  first_letter_not_at_start: {
+    title: "Erster Buchstabe nicht bei 0:00",
+  },
+  count_in_tempo_mismatch: {
+    title: "Einzähler im falschen Tempo",
+    text: "Langsames Playback mit normalem Einzähler oder umgekehrt.",
+  },
+  letters_differ_between_variants: {
+    title: "Varianten mit anderen Buchstaben",
+    text: "Verglichen mit der Hauptvariante der Gruppe.",
+  },
+  letter_time_differs_between_variants: {
+    title: "Buchstabe in Variante verschoben",
+    text: "Mehr als 3 s neben der erwarteten Stelle.",
+  },
+  part_without_viewers: {
+    title: "Stimme ohne Instrument",
+    text: "Noten, die in der App niemand sieht.",
+  },
+};
+
+const fileChecks = {
+  sha256_mismatch: {
+    title: "Prüfsumme weicht ab",
+    text: "Datei in R2 passt nicht zur Prüfsumme der Zeile.",
+  },
+  mp3_invalid: {
+    title: "MP3 nicht lesbar oder andere Länge",
+    text: "Mit mutagen gelesen, Länge mehr als 50 ms neben der DB.",
+  },
+  pdf_invalid: {
+    title: "PDF unvollständig",
+    text: "Beginnt nicht mit %PDF oder ohne %%EOF am Ende.",
+  },
+};
+
+const findingStates = {
+  visible: ["muted", () => "sichtbar"],
+  coming: ["warn", (day) => `kommt mit Freigabe ${day}`],
+  fixed: ["ok", () => "wird mit Freigabe behoben"],
+  waiting: ["muted", (day) => `wartet bis ${day}`],
+};
+
 const tableNames = {
   song: "Song",
   playback: "Playback",
@@ -123,6 +188,7 @@ const tableNames = {
   display_playback: "Sichtbarkeit",
   category: "Kategorie",
   level: "Level",
+  part: "Stimme",
 };
 
 const timeFormat = new Intl.DateTimeFormat("de-DE", { hour: "2-digit", minute: "2-digit" });
@@ -296,6 +362,13 @@ function pageTitle(title) {
 function statusChip(kind, label) {
   const symbols = { ok: "✓", error: "✕", warn: "!", muted: "•" };
   return h("span", { class: `chip ${kind}` }, h("span", { class: "view-chip-symbol", "aria-hidden": "true" }, symbols[kind] ?? "•"), label);
+}
+
+function findingStateChip(state) {
+  if (!state) return h("span", { class: "muted" }, "–");
+  const date = parseDate(state.release_at);
+  const [kind, text] = findingStates[state.kind] ?? ["muted", () => state.kind];
+  return h("span", { class: `chip ${kind}`, title: date ? formatDate(date) : null }, text(date ? shortDateFormat.format(date) : ""));
 }
 
 function table(headers, rows, className = "") {
@@ -1190,7 +1263,18 @@ function ciView(body, life) {
 // Datenbank
 // ---------------------------------------------------------------------------
 
-function backgroundJob({ life, slot, url, buttonLabel, progressLabel, resultView, showsLastResult = false, onFinished = null }) {
+function backgroundJob({
+  life,
+  slot,
+  url,
+  buttonLabel,
+  progressLabel,
+  resultView,
+  showsLastResult = false,
+  onFinished = null,
+  requestBody = null,
+  onProgress = null,
+}) {
   const idle = { running: false, total: 0, done: 0, failed: 0 };
   const state = { progress: null, timer: null, starting: false, failures: 0, pollError: null };
   life.onCleanup(() => clearTimeout(state.timer));
@@ -1222,6 +1306,7 @@ function backgroundJob({ life, slot, url, buttonLabel, progressLabel, resultView
     } else if (progress?.finished || (showsLastResult && progress?.finished_at)) {
       status = resultView(progress);
     }
+    const hadFocus = slot.contains(document.activeElement);
     fill(
       slot,
       status,
@@ -1229,10 +1314,15 @@ function backgroundJob({ life, slot, url, buttonLabel, progressLabel, resultView
         ? null
         : h(
             "button",
-            { class: "button small", type: "button", disabled: running, onclick: start },
+            { class: "button small", type: "button", disabled: running, onclick: () => start() },
             running ? "Läuft …" : buttonLabel,
           ),
     );
+    if (hadFocus) slot.querySelector("button:not(:disabled)")?.focus();
+  }
+
+  function reportError(error) {
+    onProgress?.({ ...state.progress, running: false, error });
   }
 
   function retry() {
@@ -1246,6 +1336,7 @@ function backgroundJob({ life, slot, url, buttonLabel, progressLabel, resultView
     const wasRunning = state.progress?.running ?? false;
     state.progress = { ...progress, finished: !progress.running && (wasRunning || state.progress?.finished) };
     draw();
+    onProgress?.(state.progress);
     if (wasRunning && !progress.running && !state.starting) onFinished?.(progress);
     clearTimeout(state.timer);
     if (progress.running) state.timer = setTimeout(poll, checksumPollMs);
@@ -1266,6 +1357,7 @@ function backgroundJob({ life, slot, url, buttonLabel, progressLabel, resultView
       if (!state.progress) {
         state.progress = { running: false, error };
         draw();
+        reportError(error);
         return;
       }
       if (!state.progress.running) return;
@@ -1274,18 +1366,31 @@ function backgroundJob({ life, slot, url, buttonLabel, progressLabel, resultView
       if (state.failures >= checksumMaxFailures) {
         state.pollError = error;
         draw();
+        reportError(error);
         return;
       }
       state.timer = setTimeout(poll, checksumRetryMs);
     }
   }
 
-  async function start() {
+  async function start(body = requestBody?.()) {
+    if (state.starting || (state.progress?.running && !state.pollError)) return;
     state.starting = true;
-    state.progress = { ...idle, running: true, finished: false };
+    state.failures = 0;
+    state.pollError = null;
+    clearTimeout(state.timer);
+    state.progress = {
+      ...idle,
+      results: state.progress?.results,
+      last_run_results: state.progress?.last_run_results,
+      checks: body?.checks,
+      running: true,
+      finished: false,
+    };
     draw();
+    onProgress?.(state.progress);
     try {
-      const progress = await load(url, life, { method: "POST" });
+      const progress = await load(url, life, body === undefined ? { method: "POST" } : { method: "POST", body });
       if (!life.alive) return;
       state.starting = false;
       apply(progress ?? idle);
@@ -1294,32 +1399,48 @@ function backgroundJob({ life, slot, url, buttonLabel, progressLabel, resultView
       state.starting = false;
       state.progress = { running: false, error };
       draw();
+      onProgress?.(state.progress);
     }
   }
 
-  return { draw, poll };
+  return { draw, poll, start };
 }
 
 export function renderDatabase(container, { signal } = {}) {
   const life = lifecycle(signal);
   const slots = {
-    integrity: h("div", {}),
+    checks: h("div", { class: "db-checks" }),
+    checksAll: h("div", { class: "db-checks-actions" }),
     files: h("div", {}),
     checksums: h("div", { class: "db-checksums" }),
-    verification: h("div", { class: "db-verification" }),
+    fileJob: h("div", { class: "db-checksums" }),
     storage: h("div", {}),
     releases: h("div", {}),
     cron: h("div", {}),
   };
+  const checks = {
+    database: { running: false, checkedAt: null, findings: null, error: null },
+    content: { running: false, checkedAt: null, findings: null, error: null },
+    files: { progress: null, results: {}, lastRun: {}, signature: null },
+    hidden: new Set(),
+    hiddenError: null,
+    hiddenLoading: false,
+    hiddenRequest: null,
+    hiddenChangesDuringLoad: new Map(),
+    changingKeys: new Set(),
+    showHidden: false,
+    open: new Set(),
+  };
 
   const loadAll = () => {
-    loadInto(slots.integrity, life, "/api/integrity", drawIntegrity);
+    runAllChecks();
+    loadHiddenFindings();
     loadFiles();
     loadInto(slots.storage, life, "/api/storage", drawStorage);
     loadInto(slots.releases, life, "/api/releases", drawReleases);
     loadInto(slots.cron, life, "/api/cron", drawCron);
     backfill.poll();
-    verification.poll();
+    fileJob.poll();
   };
 
   const loadFiles = () => loadInto(slots.files, life, "/api/files", drawFiles);
@@ -1332,18 +1453,20 @@ export function renderDatabase(container, { signal } = {}) {
     resultView: drawBackfillResult,
     // Nach dem Durchgang stimmen Integrität und Dateien nicht mehr
     onFinished: () => {
-      loadInto(slots.integrity, life, "/api/integrity", drawIntegrity);
+      runDatabaseChecks();
       loadFiles();
     },
   });
-  const verification = backgroundJob({
+  const fileJob = backgroundJob({
     life,
-    slot: slots.verification,
-    url: "/api/checksums/verify",
-    buttonLabel: "Prüfsummen prüfen",
-    progressLabel: "Prüfsummen prüfen",
-    resultView: drawVerificationResult,
+    slot: slots.fileJob,
+    url: "/api/file-checks",
+    buttonLabel: "Alle Dateiprüfungen",
+    progressLabel: "Dateiprüfungen",
+    resultView: drawFileJobResult,
     showsLastResult: true,
+    requestBody: () => ({ checks: Object.keys(fileChecks) }),
+    onProgress: applyFileProgress,
   });
   const leftColumn = h(
     "div",
@@ -1363,9 +1486,7 @@ export function renderDatabase(container, { signal } = {}) {
       h(
         "div",
         { class: "grid" },
-        // Prüfsummen als Aktion im Kopf der Integrität statt eines fast leeren eigenen Panels
-        panel({ title: "Integrität", wide: true, actions: slots.checksums }, slots.integrity),
-        panel({ title: "Prüfsummen prüfen", wide: true }, slots.verification),
+        panel({ title: "Prüfungen", wide: true, actions: slots.checksAll }, slots.checks),
         // Links drei kleine Panels übereinander, rechts die Cron-Läufe. Die Zahl der sichtbaren
         // Läufe richtet sich nach der Höhe links, so enden beide Spalten bündig.
         h(
@@ -1411,66 +1532,482 @@ export function renderDatabase(container, { signal } = {}) {
     }
   }
 
-  function drawIntegrity(data) {
-    const findings = data?.findings ?? [];
-    const groups = new Map();
-    for (const finding of findings) {
-      const group = groups.get(finding.check_name) ?? { name: finding.check_name, severity: finding.severity, rows: [] };
-      if (finding.severity === "error") group.severity = "error";
-      group.rows.push(finding);
-      groups.set(finding.check_name, group);
-    }
-    const ordered = [...groups.values()].sort((a, b) => (a.severity === b.severity ? b.rows.length - a.rows.length : a.severity === "error" ? -1 : 1));
-    const errors = findings.filter((finding) => finding.severity === "error").length;
-    const warnings = findings.length - errors;
-    const summary = h(
-      "p",
-      { class: "db-summary" },
-      errors ? statusChip("error", plural(errors, "Fehler", "Fehler")) : statusChip("ok", "Keine Fehler"),
-      warnings ? statusChip("warn", plural(warnings, "Warnung", "Warnungen")) : null,
-    );
-    if (!findings.length) return summary;
-    const groupView = (group) => {
-      const info = integrityChecks[group.name] ?? { title: group.name, text: "" };
-      return h(
-        "details",
-        { class: `db-finding db-finding-${group.severity}`, open: group.severity === "error" },
-        h(
-          "summary",
-          {},
-          h(
-            "span",
-            { class: `chip ${group.severity === "error" ? "error" : "warn"}`, role: "img", "aria-label": group.severity === "error" ? "Fehler" : "Warnung" },
-            group.severity === "error" ? "✕" : "!",
-          ),
-          h("span", { class: "db-finding-title" }, info.title),
-          h("span", { class: "chip muted" }, numberFormat.format(group.rows.length)),
-          info.text ? h("span", { class: "muted db-finding-text" }, info.text) : null,
-        ),
-        table(
-          ["Song", "Tabelle", { label: "ID", numeric: true }, "Detail"],
-          group.rows.map((row) =>
-            h(
-              "tr",
-              {},
-              cell(row.song_name ?? (row.song_id != null ? `Song ${row.song_id}` : "–")),
-              cell(tableNames[row.table_name] ?? row.table_name ?? "–"),
-              cell(row.row_id != null ? String(row.row_id) : "–", { numeric: true, mono: true }),
-              cell(row.detail ?? "", { className: "db-detail" }),
-            ),
-          ),
-          "db-finding-table",
-        ),
-      );
+  function databaseFinding(row) {
+    const finding = {
+      ...row,
+      kind: "database",
+      check: row.check_name,
+      subject: `${row.table_name ?? "-"}:${row.row_id ?? "-"}`,
+      detail: row.detail ?? "",
+      state: null,
     };
-    // Fehler offen über die volle Breite, Warnungen eingeklappt im zweispaltigen Raster
-    const errorGroups = ordered.filter((group) => group.severity === "error");
-    const warningGroups = ordered.filter((group) => group.severity !== "error");
-    return [
-      summary,
-      errorGroups.length ? h("div", { class: "db-findings" }, errorGroups.map(groupView)) : null,
-      warningGroups.length ? h("div", { class: "db-findings db-findings-warnings" }, warningGroups.map(groupView)) : null,
+    return { ...finding, key: findingKey(finding) };
+  }
+
+  function fileFinding(row) {
+    const songReleaseAt = parseDate(row.song_release_at);
+    const state = row.release_at
+      ? { kind: "coming", release_at: row.release_at }
+      : songReleaseAt && songReleaseAt > new Date()
+        ? { kind: "waiting", release_at: row.song_release_at }
+        : null;
+    const finding = { ...row, kind: "file", check: row.check_name, subject: `${row.table_name}:${row.row_id}`, detail: row.detail ?? "", state };
+    return { ...finding, key: findingKey(finding) };
+  }
+
+  async function runCheckGroup(group, path, toResult) {
+    if (group.running) {
+      group.queued = true;
+      drawChecks();
+      return;
+    }
+    group.running = true;
+    drawChecks();
+    try {
+      const data = await load(path, life);
+      if (!life.alive) return;
+      Object.assign(group, toResult(data), { error: null });
+    } catch (error) {
+      if (!life.alive) return;
+      group.error = error;
+    } finally {
+      if (life.alive) {
+        group.running = false;
+        if (group.queued) {
+          group.queued = false;
+          runCheckGroup(group, path, toResult);
+        } else {
+          drawChecks();
+        }
+      }
+    }
+  }
+
+  function runDatabaseChecks() {
+    return runCheckGroup(checks.database, "/api/integrity", (data) => ({
+      checkedAt: data?.checked_at ?? new Date().toISOString(),
+      findings: (data?.findings ?? []).map(databaseFinding),
+    }));
+  }
+
+  function runContentChecks() {
+    return runCheckGroup(checks.content, "/api/content", (data) => ({
+      checkedAt: data?.generated_at ?? new Date().toISOString(),
+      findings: evaluateContent(data ?? {}, new Date()),
+    }));
+  }
+
+  function runAllChecks() {
+    runDatabaseChecks();
+    runContentChecks();
+  }
+
+  function setHidden(key, hidden) {
+    if (hidden) checks.hidden.add(key);
+    else checks.hidden.delete(key);
+    if (checks.hiddenLoading) checks.hiddenChangesDuringLoad.set(key, hidden);
+  }
+
+  function loadHiddenFindings() {
+    checks.hiddenRequest ??= fetchHiddenFindings().finally(() => {
+      checks.hiddenRequest = null;
+    });
+    return checks.hiddenRequest;
+  }
+
+  async function fetchHiddenFindings() {
+    checks.hiddenLoading = true;
+    checks.hiddenChangesDuringLoad.clear();
+    try {
+      const data = await load("/api/hidden-findings", life);
+      if (!life.alive) return;
+      const hidden = new Set((data?.hidden ?? []).map((entry) => entry.key));
+      for (const [key, isHidden] of checks.hiddenChangesDuringLoad) {
+        if (isHidden) hidden.add(key);
+        else hidden.delete(key);
+      }
+      checks.hidden = hidden;
+      checks.hiddenError = null;
+    } catch (error) {
+      if (!life.alive) return;
+      checks.hiddenError = error;
+    } finally {
+      checks.hiddenLoading = false;
+      checks.hiddenChangesDuringLoad.clear();
+    }
+    drawChecks();
+  }
+
+  async function toggleHidden(finding) {
+    const key = finding.key;
+    if (checks.changingKeys.has(key)) return;
+    const hide = !checks.hidden.has(key);
+    checks.changingKeys.add(key);
+    setHidden(key, hide);
+    checks.hiddenError = null;
+    drawChecks();
+    try {
+      if (hide) await load("/api/hidden-findings", life, { method: "POST", body: { key, check_name: finding.check } });
+      else await load(`/api/hidden-findings/${key}`, life, { method: "DELETE" });
+    } catch (error) {
+      if (!life.alive || (!hide && error?.code === "not_found")) return;
+      setHidden(key, !hide);
+      checks.hiddenError = error;
+    } finally {
+      checks.changingKeys.delete(key);
+      if (life.alive) drawChecks();
+    }
+  }
+
+  function fileResults(results) {
+    return Object.fromEntries(
+      Object.entries(results ?? {}).map(([name, result]) => [name, { ...result, findings: (result.findings ?? []).map(fileFinding) }]),
+    );
+  }
+
+  function applyFileProgress(progress) {
+    const signature = JSON.stringify([
+      progress?.running,
+      progress?.finished_at,
+      progress?.checks,
+      Boolean(progress?.error),
+      Object.values(progress?.results ?? {}).map((result) => result.finished_at),
+      Object.values(progress?.last_run_results ?? {}).map((result) => result.finished_at),
+    ]);
+    if (signature === checks.files.signature) return;
+    checks.files.signature = signature;
+    checks.files.progress = progress;
+    if (progress?.results) checks.files.results = fileResults(progress.results);
+    if (progress?.last_run_results) checks.files.lastRun = fileResults(progress.last_run_results);
+    drawChecks();
+  }
+
+  function drawFileJobResult(progress) {
+    const parts = [`${plural(progress.done - progress.failed, "Datei", "Dateien")} geprüft`];
+    if (progress.failed) parts.push(`${numberFormat.format(progress.failed)} nicht abrufbar oder nicht in R2`);
+    if (progress.aborted) parts.push(`abgebrochen: ${fileCheckAbortReasons[progress.aborted] ?? progress.aborted}`);
+    return h("p", { class: "muted", role: "status" }, `${parts.join(", ")} · `, timeElement(progress.finished_at));
+  }
+
+  function missingText(result) {
+    return result.missing ? `${plural(result.missing, "Datei fehlt", "Dateien fehlen")} in R2 (siehe „Datei fehlt im Bucket“)` : null;
+  }
+
+  function incompleteNote(result, olderResultShown) {
+    const unreachable = (result.failed ?? 0) - (result.missing ?? 0);
+    const parts = [`${numberFormat.format(result.checked)} von ${numberFormat.format(result.total)} geprüft`];
+    if (unreachable > 0) parts.push(`${numberFormat.format(unreachable)} nicht abrufbar`);
+    if (result.missing) parts.push(missingText(result));
+    if (result.aborted) parts.push(`abgebrochen: ${fileCheckAbortReasons[result.aborted] ?? result.aborted}`);
+    if (olderResultShown) parts.push(`${plural(result.findings?.length ?? 0, "Fund", "Funde")} im abgebrochenen Lauf`);
+    return [`Letzter Durchgang unvollständig (${parts.join(", ")}) · `, timeElement(result.finished_at)];
+  }
+
+  function groupRowState(group, name, run) {
+    return {
+      running: group.running,
+      error: group.error,
+      checkedAt: group.checkedAt,
+      findings: group.findings ? group.findings.filter((finding) => finding.check === name) : null,
+      blocked: false,
+      run,
+    };
+  }
+
+  function fileRowState(name) {
+    const progress = checks.files.progress;
+    const complete = checks.files.results[name] ?? null;
+    const lastRun = checks.files.lastRun[name] ?? null;
+    const incomplete = lastRun && !lastRun.complete && (!complete || String(lastRun.finished_at) > String(complete.finished_at)) ? lastRun : null;
+    const shown = complete ?? incomplete;
+    let note = null;
+    if (incomplete) {
+      note = incompleteNote(incomplete, complete != null);
+    } else if (shown) {
+      const parts = [
+        shown.skipped ? `${plural(shown.skipped, "Datei", "Dateien")} ohne Prüfsumme übersprungen` : null,
+        missingText(shown),
+      ].filter(Boolean);
+      note = parts.length ? parts.join(", ") : null;
+    }
+    return {
+      running: Boolean(progress?.running) && (progress.checks ?? []).includes(name),
+      error: null,
+      checkedAt: shown?.finished_at ?? null,
+      findings: shown ? shown.findings : null,
+      note,
+      blocked: Boolean(progress?.running),
+      run: () => fileJob.start({ checks: [name] }),
+    };
+  }
+
+  function rowModel(kind, name, info, state) {
+    const all = state.findings ?? [];
+    const visible = all.filter((finding) => !checks.hidden.has(finding.key));
+    const errors = visible.filter((finding) => finding.severity === "error").length;
+    const warnings = visible.length - errors;
+    return { kind, name, info, state, all, visible, errors, warnings, rank: errors ? 0 : warnings ? 1 : 2 };
+  }
+
+  function hideButton(finding, title, fallbackFocusKey) {
+    const hidden = checks.hidden.has(finding.key);
+    const label = hidden ? "Einblenden" : "Ausblenden";
+    return h(
+      "button",
+      {
+        class: "button small",
+        type: "button",
+        "aria-busy": checks.changingKeys.has(finding.key) ? "true" : null,
+        "data-focus-key": `hide:${finding.key}`,
+        "data-focus-fallback": fallbackFocusKey,
+        "aria-label": `${label}: ${title}, ${finding.song_name ?? finding.target ?? ""} ${finding.detail}`.trim(),
+        onclick: () => toggleHidden(finding),
+      },
+      label,
+    );
+  }
+
+  function findingTable(model, findings) {
+    const songCell = (finding) => cell(finding.song_name ?? (finding.song_id != null ? `Song ${finding.song_id}` : "–"));
+    const actionHeader = { label: h("span", { class: "visually-hidden" }, "Aktion") };
+    const headers = {
+      database: ["Song", "Tabelle", { label: "ID", numeric: true }, "Detail", actionHeader],
+      content: ["Song", "Stand", "Betroffen", "Detail", actionHeader],
+      file: ["Song", "Stand", "Datei", "Detail", actionHeader],
+    }[model.kind];
+    const cells = (finding) => {
+      if (model.kind === "database") {
+        return [
+          songCell(finding),
+          cell(tableNames[finding.table_name] ?? finding.table_name ?? "–"),
+          cell(finding.row_id != null ? String(finding.row_id) : "–", { numeric: true, mono: true }),
+        ];
+      }
+      if (model.kind === "content") return [songCell(finding), cell(findingStateChip(finding.state)), cell(finding.target)];
+      return [
+        songCell(finding),
+        cell(findingStateChip(finding.state)),
+        cell([
+          `${tableNames[finding.table_name] ?? finding.table_name} ${finding.row_id}`,
+          h("small", { class: "mono db-path db-file-path" }, `${finding.bucket}/${finding.path}`),
+        ]),
+      ];
+    };
+    return table(
+      headers,
+      findings.map((finding) =>
+        h(
+          "tr",
+          { class: checks.hidden.has(finding.key) ? "db-hidden" : null },
+          cells(finding),
+          cell(finding.usage ? `${finding.detail} · ${finding.usage}` : finding.detail, { className: "db-detail" }),
+          cell(hideButton(finding, model.info.title, `toggle:${model.kind}:${model.name} run:${model.kind}:${model.name}`), {
+            className: "db-hide",
+          }),
+        ),
+      ),
+      `db-finding-table db-finding-table-${model.kind}`,
+    );
+  }
+
+  function checkRowView(model) {
+    const { kind, name, info, state } = model;
+    const id = `${kind}:${name}`;
+    const shown = checks.showHidden ? model.all : model.visible;
+    const hiddenCount = model.all.length - model.visible.length;
+    const open = checks.open.has(id) && shown.length > 0;
+    const tableId = `db-check-${kind}-${name}`;
+    let status;
+    if (state.running) status = statusChip("muted", "Läuft …");
+    else if (state.error) status = statusChip("error", "Fehlgeschlagen");
+    else if (state.findings == null) status = statusChip("muted", "Nicht geprüft");
+    else if (model.errors) status = statusChip("error", plural(model.errors, "Fehler", "Fehler"));
+    else if (model.warnings) status = statusChip("warn", plural(model.warnings, "Warnung", "Warnungen"));
+    else status = statusChip("ok", "OK");
+    const severity = model.errors ? "error" : model.warnings ? "warning" : null;
+    return h(
+      "div",
+      { class: `db-finding db-check${severity ? ` db-finding-${severity}` : ""}` },
+      h(
+        "div",
+        { class: "db-check-head" },
+        status,
+        model.errors && model.warnings ? statusChip("warn", plural(model.warnings, "Warnung", "Warnungen")) : null,
+        h("span", { class: "db-finding-title" }, info.title),
+        hiddenCount ? h("span", { class: "chip muted" }, `${numberFormat.format(hiddenCount)} ausgeblendet`) : null,
+        info.text ? h("span", { class: "muted db-finding-text" }, info.text) : null,
+        h(
+          "span",
+          { class: "db-check-actions" },
+          state.checkedAt ? h("span", { class: "muted db-check-time" }, "geprüft ", timeElement(state.checkedAt)) : null,
+          state.extra ?? null,
+          shown.length
+            ? h(
+                "button",
+                {
+                  class: "button small",
+                  type: "button",
+                  "data-focus-key": `toggle:${id}`,
+                  "data-focus-fallback": `run:${id}`,
+                  "aria-expanded": String(open),
+                  "aria-controls": open ? tableId : null,
+                  "aria-label": `${open ? "Zuklappen" : plural(shown.length, "Fund", "Funde")}: ${info.title}`,
+                  onclick: () => {
+                    if (checks.open.has(id)) checks.open.delete(id);
+                    else checks.open.add(id);
+                    drawChecks();
+                  },
+                },
+                open ? "Zuklappen" : plural(shown.length, "Fund", "Funde"),
+              )
+            : null,
+          h(
+            "button",
+            {
+              class: "button small",
+              type: "button",
+              disabled: state.blocked,
+              "data-focus-key": `run:${id}`,
+              "aria-label": `${state.running ? "Läuft" : "Prüfen"}: ${info.title}`,
+              onclick: () => state.run(),
+            },
+            state.running ? "Läuft …" : "Prüfen",
+          ),
+        ),
+      ),
+      state.note ? h("p", { class: "muted db-check-note" }, state.note) : null,
+      open ? h("div", { id: tableId, class: "db-check-findings" }, findingTable(model, shown)) : null,
+    );
+  }
+
+  function focusedElement() {
+    const active = document.activeElement;
+    if (!active || !(slots.checks.contains(active) || slots.checksAll.contains(active))) return null;
+    return {
+      element: active,
+      keys: [active.getAttribute("data-focus-key"), ...(active.getAttribute("data-focus-fallback") ?? "").split(" ")].filter(Boolean),
+    };
+  }
+
+  function restoreFocus(focused) {
+    if (!focused) return;
+    if (!focused.element.disabled && (slots.checks.contains(focused.element) || slots.checksAll.contains(focused.element))) {
+      if (document.activeElement !== focused.element) focused.element.focus();
+      return;
+    }
+    for (const key of focused.keys) {
+      const selector = `[data-focus-key="${CSS.escape(key)}"]`;
+      const target = slots.checks.querySelector(selector) ?? slots.checksAll.querySelector(selector);
+      if (target && !target.disabled) {
+        target.focus();
+        return;
+      }
+    }
+  }
+
+  function headerStatus(groups) {
+    const fileResultsPresent = Object.keys(checks.files.results).length > 0 || Object.keys(checks.files.lastRun).length > 0;
+    if (checks.database.running || checks.content.running || checks.files.progress?.running) return statusChip("muted", "Läuft …");
+    const incomplete =
+      groups.some((group) => group.error) ||
+      checks.database.findings == null ||
+      checks.content.findings == null ||
+      Boolean(checks.files.progress?.error) ||
+      (fileResultsPresent && Object.values(checks.files.lastRun).some((result) => !result.complete));
+    if (incomplete) return statusChip("muted", "Unvollständig");
+    return null;
+  }
+
+  function drawChecks() {
+    if (!life.alive) return;
+    const focused = focusedElement();
+    const knownDatabaseChecks = Object.entries(integrityChecks);
+    for (const finding of checks.database.findings ?? []) {
+      if (!knownDatabaseChecks.some(([name]) => name === finding.check)) {
+        knownDatabaseChecks.push([finding.check, { title: finding.check }]);
+      }
+    }
+    const groups = [
+      {
+        kind: "database",
+        title: "Datenbank",
+        error: checks.database.error,
+        retry: runDatabaseChecks,
+        models: knownDatabaseChecks.map(([name, info]) => {
+          const state = groupRowState(checks.database, name, runDatabaseChecks);
+          if (name === "missing_sha256") state.extra = slots.checksums;
+          return rowModel("database", name, info, state);
+        }),
+      },
+      {
+        kind: "content",
+        title: "Inhalt",
+        error: checks.content.error,
+        retry: runContentChecks,
+        models: contentCheckNames.map((name) =>
+          rowModel("content", name, contentChecks[name] ?? { title: name }, groupRowState(checks.content, name, runContentChecks)),
+        ),
+      },
+      {
+        kind: "file",
+        title: "Dateien",
+        head: slots.fileJob,
+        models: Object.entries(fileChecks).map(([name, info]) => rowModel("file", name, info, fileRowState(name))),
+      },
     ];
+    const models = groups.flatMap((group) => group.models);
+    const errors = models.reduce((sum, model) => sum + model.errors, 0);
+    const warnings = models.reduce((sum, model) => sum + model.warnings, 0);
+    const hiddenCount = models.reduce((sum, model) => sum + model.all.length - model.visible.length, 0);
+    const running = checks.database.running || checks.content.running;
+    const neutralStatus = headerStatus(groups);
+    fill(
+      slots.checksAll,
+      errors ? statusChip("error", plural(errors, "Fehler", "Fehler")) : (neutralStatus ?? statusChip("ok", "Keine Fehler")),
+      errors && neutralStatus ? neutralStatus : null,
+      warnings ? statusChip("warn", plural(warnings, "Warnung", "Warnungen")) : null,
+      hiddenCount || checks.showHidden
+        ? h(
+            "button",
+            {
+              class: "button small",
+              type: "button",
+              "data-focus-key": "show-hidden",
+              "aria-pressed": String(checks.showHidden),
+              onclick: () => {
+                checks.showHidden = !checks.showHidden;
+                drawChecks();
+              },
+            },
+            `Ausgeblendete zeigen (${numberFormat.format(hiddenCount)})`,
+          )
+        : null,
+      h(
+        "button",
+        {
+          class: "button small primary",
+          type: "button",
+          "data-focus-key": "run-all",
+          "aria-label": running ? "Läuft: Alle prüfen" : "Alle prüfen",
+          onclick: runAllChecks,
+        },
+        running ? "Läuft …" : "Alle prüfen",
+      ),
+    );
+    fill(
+      slots.checks,
+      checks.hiddenError ? errorView(checks.hiddenError, loadHiddenFindings) : null,
+      groups.map((group) =>
+        h(
+          "section",
+          { class: "db-check-group" },
+          h("div", { class: "db-subhead" }, h("h3", {}, group.title), group.head ?? null),
+          group.error ? errorView(group.error, group.retry) : null,
+          h("div", { class: "db-findings" }, [...group.models].sort((left, right) => left.rank - right.rank).map(checkRowView)),
+        ),
+      ),
+    );
+    restoreFocus(focused);
   }
 
   function drawFiles(data) {
@@ -1496,7 +2033,7 @@ export function renderDatabase(container, { signal } = {}) {
             const result = await load("/api/files/cleanup", life, { method: "POST" });
             if (!life.alive) return;
             loadInto(slots.storage, life, "/api/storage", drawStorage);
-            loadInto(slots.integrity, life, "/api/integrity", drawIntegrity);
+            runDatabaseChecks();
             await loadFiles();
             slots.files.prepend(h("p", { class: "db-notice", role: "status" }, `${plural(result?.removed ?? 0, "Datei", "Dateien")} gelöscht.`));
           } catch (error) {
@@ -1533,47 +2070,6 @@ export function renderDatabase(container, { signal } = {}) {
         ? "Alle vorhanden."
         : `${added} nachgetragen${progress.failed ? `, ${progress.failed} fehlgeschlagen` : ""}.`,
     );
-  }
-
-  function drawVerificationResult(progress) {
-    const mismatches = progress.mismatches ?? [];
-    const skipped = progress.skipped ?? 0;
-    const checked = progress.done - progress.failed - skipped;
-    const incomplete = Boolean(progress.aborted) || progress.done < progress.total;
-    const parts = [`${numberFormat.format(checked)} geprüft`];
-    if (progress.failed) parts.push(`${numberFormat.format(progress.failed)} nicht abrufbar`);
-    if (skipped) parts.push(`${numberFormat.format(skipped)} ohne Prüfsumme`);
-    if (incomplete) {
-      const reason = verificationAbortReasons[progress.aborted] ?? progress.aborted;
-      parts.push(
-        `abgebrochen nach ${numberFormat.format(progress.done)} / ${numberFormat.format(progress.total)}${reason ? ` (${reason})` : ""}`,
-      );
-    }
-    const chip = mismatches.length
-      ? statusChip("error", plural(mismatches.length, "Abweichung", "Abweichungen"))
-      : incomplete || progress.failed
-        ? statusChip("warn", "Nicht vollständig geprüft")
-        : progress.total === 0
-          ? statusChip("warn", "Keine Dateien gefunden")
-          : statusChip("ok", "Alle stimmen");
-    return [
-      h("p", { class: "db-summary", role: "status" }, chip, h("span", { class: "muted" }, `${parts.join(", ")} · `, timeElement(progress.finished_at))),
-      mismatches.length
-        ? table(
-            ["Song", "Tabelle", { label: "ID", numeric: true }, "Datei"],
-            mismatches.map((row) =>
-              h(
-                "tr",
-                {},
-                cell(row.song_name ?? (row.song_id != null ? `Song ${row.song_id}` : "–")),
-                cell(tableNames[row.table_name] ?? row.table_name),
-                cell(String(row.row_id), { numeric: true, mono: true }),
-                cell(`${row.bucket}/${row.path}`, { mono: true, className: "db-path" }),
-              ),
-            ),
-          )
-        : null,
-    ];
   }
 
   function drawStorage(data) {
@@ -1697,7 +2193,8 @@ export function renderDatabase(container, { signal } = {}) {
   }
 
   backfill.draw();
-  verification.draw();
+  fileJob.draw();
+  drawChecks();
   loadAll();
   return () => life.dispose();
 }

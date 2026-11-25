@@ -492,8 +492,10 @@ function cached(entry, kind, compute) {
 const inspect = {
   pdf: (entry) =>
     cached(entry, "pdf", async () => {
-      const head = new Uint8Array(await entry.file.slice(0, 1024).arrayBuffer());
-      return new TextDecoder("windows-1252").decode(head).includes("%PDF");
+      const decoder = new TextDecoder("windows-1252");
+      const head = new Uint8Array(await entry.file.slice(0, 4).arrayBuffer());
+      const tail = new Uint8Array(await entry.file.slice(-1024).arrayBuffer());
+      return decoder.decode(head) === "%PDF" && decoder.decode(tail).includes("%%EOF");
     }),
   audio: (entry) =>
     cached(entry, "audio", async () => {

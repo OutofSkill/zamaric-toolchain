@@ -8,12 +8,11 @@ Schritte entsprechen dem Ablauf in der README (Upload-Tool → POST /api/upload)
 
 import hashlib
 import logging
+import os
 import uuid
 
 import httpx
 from fastapi import Request
-from mutagen import MutagenError
-from mutagen.mp3 import MP3
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 # request.form() liefert Starlettes UploadFile, nicht die Unterklasse von FastAPI
@@ -22,6 +21,7 @@ from starlette.exceptions import HTTPException
 from supabase import PostgrestAPIError
 
 from errors import ApiError
+from file_content import PDF_END_WINDOW_BYTES, PDF_START, InvalidFileContent, has_pdf_end, is_pdf_start, mp3_duration_ms
 from manifest import Manifest, UpdateManifest
 from sessions import Session, fresh_client
 from storage import AUDIO_BUCKET, SHEET_MUSIC_BUCKET, upload_file
@@ -168,22 +168,23 @@ def measure_files(manifest: Manifest | UpdateManifest, files_by_path: dict[str, 
 def measure_mp3(path: str, file: UploadFile) -> int:
     """Liest die MP3 mit mutagen und gibt ihre Länge in Millisekunden zurück."""
     try:
-        audio = MP3(file.file)
-    except MutagenError as error:
-        raise ApiError(422, "invalid_file_content", f"{path!r}: {error}") from None
+        return mp3_duration_ms(file.file)
+    except InvalidFileContent as error:
+        raise ApiError(422, "invalid_file_content", f"{path!r} {error}") from None
     finally:
         file.file.seek(0)
-    duration_ms = round(audio.info.length * 1000)
-    if duration_ms <= 0:
-        raise ApiError(422, "invalid_file_content", f"{path!r} hat keine Länge")
-    return duration_ms
 
 
 def check_pdf(path: str, file: UploadFile) -> None:
-    start = file.file.read(4)
+    start = file.file.read(len(PDF_START))
+    file.file.seek(0, os.SEEK_END)
+    file.file.seek(max(0, file.file.tell() - PDF_END_WINDOW_BYTES))
+    tail = file.file.read()
     file.file.seek(0)
-    if start != b"%PDF":
+    if not is_pdf_start(start):
         raise ApiError(422, "invalid_file_content", f"{path!r} beginnt nicht mit %PDF")
+    if not has_pdf_end(tail):
+        raise ApiError(422, "invalid_file_content", f"{path!r} endet nicht mit %%EOF")
 
 
 def file_sha256(file: UploadFile) -> str:

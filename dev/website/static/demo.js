@@ -549,6 +549,200 @@ function overviewResponse() {
   };
 }
 
+function demoLetter(name, seconds, countInId) {
+  return { name, position_ms: Math.round(seconds * 1000), count_in_id: countInId };
+}
+
+function demoPlayback(id, type, letters, extra = {}) {
+  return { id, type, duration_ms: 214000, instrument_mode: "all", instrument_ids: [], release_at: null, replaces_id: null, letters, ...extra };
+}
+
+function demoSheet(id, partId, extra = {}) {
+  return { id, part_id: partId, level_id: 1, release_at: null, replaces_id: null, ...extra };
+}
+
+function demoCountIn(id, name, extra = {}) {
+  return { id, name, duration_ms: 2100, release_at: null, replaces_id: null, ...extra };
+}
+
+function contentResponse() {
+  const pendingRelease = iso(now + 26 * hour);
+  return {
+    generated_at: iso(Date.now()),
+    categories: [
+      { id: 1, name: "Konzert", position: 0 },
+      { id: 2, name: "Party", position: 1 },
+    ],
+    levels: [
+      { id: 1, name: "Normal" },
+      { id: 2, name: "Leicht" },
+    ],
+    instruments: [
+      { id: 1, name: "Trompete", transposition: "B" },
+      { id: 2, name: "Posaune", transposition: "C" },
+      { id: 3, name: "Tuba", transposition: "C" },
+      { id: 4, name: "DrumSet", transposition: "" },
+      { id: 5, name: "Altsaxophon", transposition: "Es" },
+      { id: 6, name: "Tenorsaxophon", transposition: "B" },
+    ],
+    parts: [
+      { id: 10, name: "Trompete", transposition: "B" },
+      { id: 11, name: "Posaune", transposition: "C" },
+      { id: 12, name: "Tuba", transposition: "C" },
+      { id: 30, name: "Akkordblatt", transposition: "C" },
+    ],
+    instrument_parts: [
+      { part_id: 10, instrument_id: 1 },
+      { part_id: 11, instrument_id: 2 },
+      { part_id: 12, instrument_id: 3 },
+    ],
+    songs: [
+      {
+        id: 4,
+        name: "Alba",
+        category_id: 1,
+        release_at: null,
+        count_ins: [demoCountIn(40, "4-4"), demoCountIn(41, "4-4 langsamer")],
+        playbacks: [
+          demoPlayback(401, "Normal", [demoLetter("A", 0, 40), demoLetter("B", 12.5, 40), demoLetter("C", 31, 40), demoLetter("D", 52, 40)]),
+          demoPlayback(402, "ohne Drums", [demoLetter("A", 0, 40), demoLetter("C", 31, 40), demoLetter("D", 52, 40)], {
+            instrument_mode: "only",
+            instrument_ids: [4],
+          }),
+          demoPlayback(403, "Saxophon - langsamer", [demoLetter("A", 0, 40), demoLetter("B", 15, 41)]),
+        ],
+        sheet_music: [demoSheet(801, 10), demoSheet(802, 12), demoSheet(803, 30)],
+      },
+      {
+        id: 12,
+        name: "Tequila",
+        category_id: 2,
+        release_at: null,
+        count_ins: [demoCountIn(120, "3-4")],
+        playbacks: [
+          demoPlayback(121, "Normal", [demoLetter("A", 0, 120), demoLetter("B", 10, 120), demoLetter("A", 20, 120)]),
+          demoPlayback(125, "Normal", [demoLetter("A", 2, 120), demoLetter("B", 10, 120), demoLetter("C", 20, 120)], {
+            release_at: pendingRelease,
+            replaces_id: 121,
+          }),
+          demoPlayback(122, "Trompete", [demoLetter("A", 0, 120), demoLetter("B", 10, 120)], { instrument_mode: "only", instrument_ids: [2] }),
+        ],
+        sheet_music: [demoSheet(811, 10), demoSheet(812, 30), demoSheet(813, 30, { level_id: 2 })],
+      },
+      {
+        id: 44,
+        name: "Sonnenaufgang",
+        category_id: 1,
+        release_at: iso(now + 5 * hour),
+        count_ins: [demoCountIn(440, "4-4")],
+        playbacks: [
+          demoPlayback(440, "Normal", []),
+          demoPlayback(441, "Trompte", [demoLetter("A", 0, 440), demoLetter("B", 8, 440)], { instrument_mode: "only", instrument_ids: [1] }),
+        ],
+        sheet_music: [demoSheet(880, 11)],
+      },
+    ],
+  };
+}
+
+const hiddenFindings = new Map();
+
+function hiddenFindingsResponse(method, parts, body) {
+  if (method === "GET" && parts.length === 0) return { hidden: [...hiddenFindings.values()].map((entry) => clone(entry)) };
+  if (method === "POST" && parts.length === 0) {
+    if (!/^[0-9a-f]{64}$/.test(body.key ?? "") || !/^[a-z0-9_]{1,64}$/.test(body.check_name ?? "")) throw demoError("invalid_request", 422);
+    if (!hiddenFindings.has(body.key)) hiddenFindings.set(body.key, { key: body.key, check_name: body.check_name, hidden_at: iso(Date.now()) });
+    return null;
+  }
+  if (method === "DELETE" && parts.length === 1) {
+    if (!hiddenFindings.delete(parts[0])) throw demoError("not_found", 404);
+    return null;
+  }
+  throw demoError("not_found", 404);
+}
+
+const fileCheckNames = ["sha256_mismatch", "mp3_invalid", "pdf_invalid"];
+
+const fileCheckSamples = {
+  sha256_mismatch: [
+    { check_name: "sha256_mismatch", severity: "error", table_name: "playback", row_id: 412, song_id: 31, song_name: "Abendrot", song_release_at: null, release_at: null, bucket: "audio", path: "5b1c0e2a-8f8e-4d1f-9b2e-0c6a7d3e1f90.mp3", detail: "R2 9f2c41d0a7b3, DB 1e8a0c55f210" },
+  ],
+  mp3_invalid: [
+    { check_name: "mp3_invalid", severity: "warning", table_name: "count_in", row_id: 120, song_id: 12, song_name: "Tequila", song_release_at: null, release_at: null, bucket: "audio", path: "a3f1c2d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d.mp3", detail: "gemessen 2140 ms, DB 2210 ms" },
+    { check_name: "mp3_invalid", severity: "error", table_name: "playback", row_id: 125, song_id: 12, song_name: "Tequila", song_release_at: null, release_at: iso(now + 26 * hour), bucket: "audio", path: "c7d8e9f0-1a2b-4c3d-9e4f-5a6b7c8d9e0f.mp3", detail: "MP3 nicht lesbar: can't sync to MPEG frame" },
+  ],
+  pdf_invalid: [
+    { check_name: "pdf_invalid", severity: "error", table_name: "sheet_music", row_id: 880, song_id: 44, song_name: "Sonnenaufgang", song_release_at: iso(now + 5 * hour), release_at: null, bucket: "sheet_music", path: "e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b.pdf", detail: "endet nicht mit %%EOF" },
+  ],
+};
+
+const fileCheckTotals = { sha256_mismatch: 2030, mp3_invalid: 412, pdf_invalid: 1630 };
+
+function fileCheckResult(name, finishedAt, extra = {}) {
+  const total = fileCheckTotals[name];
+  return {
+    finished_at: finishedAt,
+    complete: true,
+    aborted: null,
+    total,
+    checked: total,
+    skipped: name === "sha256_mismatch" ? 3 : 0,
+    failed: 0,
+    missing: 0,
+    findings: clone(fileCheckSamples[name]),
+    ...extra,
+  };
+}
+
+const fileChecks = {
+  running: false,
+  checks: ["pdf_invalid"],
+  total: 30,
+  done: 12,
+  failed: 5,
+  finished_at: iso(now - 3 * hour),
+  aborted: "storage_failed",
+  last_run_results: {
+    pdf_invalid: fileCheckResult("pdf_invalid", iso(now - 3 * hour), {
+      complete: false,
+      aborted: "storage_failed",
+      total: 1630,
+      checked: 7,
+      failed: 5,
+      missing: 1,
+      findings: [],
+    }),
+  },
+  results: {
+    sha256_mismatch: fileCheckResult("sha256_mismatch", iso(now - 2 * day)),
+    mp3_invalid: fileCheckResult("mp3_invalid", iso(now - 2 * day)),
+    pdf_invalid: fileCheckResult("pdf_invalid", iso(now - 9 * day)),
+  },
+};
+
+function advanceFileChecks() {
+  if (!fileChecks.running) return;
+  fileChecks.done = Math.min(fileChecks.total, fileChecks.done + 3 + Math.floor(Math.random() * 4));
+  if (fileChecks.done < fileChecks.total) return;
+  const finishedAt = iso(Date.now());
+  const finished = Object.fromEntries(fileChecks.checks.map((name) => [name, fileCheckResult(name, finishedAt)]));
+  Object.assign(fileChecks, { running: false, finished_at: finishedAt, last_run_results: finished });
+  Object.assign(fileChecks.results, clone(finished));
+}
+
+function fileChecksResponse(method, body) {
+  if (method === "POST") {
+    const names = [...new Set(Array.isArray(body.checks) ? body.checks : [])];
+    if (names.length === 0 || names.some((name) => !fileCheckNames.includes(name))) throw demoError("invalid_request", 422);
+    if (!fileChecks.running) {
+      Object.assign(fileChecks, { running: true, checks: names, total: 24, done: 0, failed: 0, finished_at: null, aborted: null, last_run_results: {} });
+    }
+  } else {
+    advanceFileChecks();
+  }
+  return clone(fileChecks);
+}
+
 // ---------------------------------------------------------------------------
 // Einstieg
 // ---------------------------------------------------------------------------
@@ -571,6 +765,7 @@ export async function demoResponse(path, init = {}) {
   const route = `${method} /${parts.join("/")}`;
 
   if (parts[0] === "board") return boardResponse(method, parts.slice(1), body);
+  if (parts[0] === "hidden-findings") return hiddenFindingsResponse(method, parts.slice(1), body);
 
   switch (route) {
     case "POST /login":
@@ -597,6 +792,11 @@ export async function demoResponse(path, init = {}) {
       unusedFiles.splice(0);
       return { removed };
     }
+    case "GET /content":
+      return contentResponse();
+    case "GET /file-checks":
+    case "POST /file-checks":
+      return fileChecksResponse(method, body);
     case "GET /checksums":
       advanceChecksums();
       return { ...checksums };

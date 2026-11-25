@@ -11,6 +11,8 @@ from contextlib import asynccontextmanager
 
 import board
 import database
+import file_checks
+import hidden_findings
 import monitor
 import overview
 import repo
@@ -37,6 +39,8 @@ async def lifespan(app):
 app = create_app(lifespan=lifespan)
 app.include_router(board.router)
 app.include_router(database.router)
+app.include_router(file_checks.router)
+app.include_router(hidden_findings.router)
 app.include_router(repo.router)
 app.include_router(monitor.router)
 app.include_router(overview.router)

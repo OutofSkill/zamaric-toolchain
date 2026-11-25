@@ -1,4 +1,4 @@
-import hashlib
+from collections.abc import AsyncIterator
 from urllib.parse import quote
 
 import httpx
@@ -88,19 +88,17 @@ async def download_file(client: AsyncClient, bucket: str, name: str) -> bytes:
     return (await worker_request(client, "GET", file_path(bucket, name), f"{bucket}/{name}")).content
 
 
-async def stored_sha256(client: AsyncClient, bucket: str, name: str) -> str:
+async def stream_file(client: AsyncClient, bucket: str, name: str) -> AsyncIterator[bytes]:
     description = f"{bucket}/{name}"
     request_headers = await worker_headers(client)
-    digest = hashlib.sha256()
     try:
         async with worker_client(SHORT_TIMEOUT_SECONDS) as http:
             async with http.stream("GET", file_path(bucket, name), headers=request_headers) as response:
                 check_worker_response(response, description)
                 async for chunk in response.aiter_bytes():
-                    digest.update(chunk)
+                    yield chunk
     except httpx.HTTPError as error:
         raise ApiError(502, "storage_failed", f"{description}: {type(error).__name__}") from None
-    return digest.hexdigest()
 
 
 async def list_files(client: AsyncClient, bucket: str) -> list[dict]:

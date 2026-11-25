@@ -837,22 +837,6 @@
   gap: 8px;
 }
 
-.db-findings + .db-findings {
-  margin-top: 8px;
-}
-
-/* Eingeklappte Warnungen nebeneinander; eine ungerade letzte über die volle Breite */
-@media (min-width: 900px) {
-  .db-findings-warnings {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-items: start;
-  }
-
-  .db-findings-warnings > :last-child:nth-child(odd) {
-    grid-column: 1 / -1;
-  }
-}
-
 /* Feste Spaltenbreiten, damit die Spalten zwischen den Gruppen nicht springen */
 .db-finding-table {
   table-layout: fixed;
@@ -903,26 +887,12 @@
   border-left: 3px solid var(--warn);
 }
 
-.db-finding > summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  cursor: pointer;
-}
-
 .db-finding-title {
   font-weight: 600;
 }
 
 .db-finding-text {
   font-size: 0.86rem;
-}
-
-.db-finding > .view-table-scroll {
-  margin: 0;
-  padding: 0 12px 10px;
 }
 
 .db-detail {
@@ -962,24 +932,96 @@
   width: 140px;
 }
 
-.db-verification {
+.db-checks-actions {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
-.db-verification > p,
-.db-verification > .db-summary {
+.db-checks {
+  display: grid;
+  gap: 18px;
+}
+
+.db-check-group {
+  display: grid;
+  gap: 8px;
+}
+
+.db-check-group h3 {
   margin: 0;
+  font-size: 0.88rem;
 }
 
-.db-verification .progress {
-  width: min(320px, 100%);
+.db-check-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
 }
 
-.db-verification > .view-table-scroll {
-  align-self: stretch;
+.db-check-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.db-check-time {
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.db-check-note {
+  margin: 0;
+  padding: 0 12px 8px;
+  font-size: 0.85rem;
+}
+
+.db-check-findings > .view-table-scroll {
+  margin: 0;
+  padding: 0 12px 10px;
+}
+
+.db-finding-table-content th:nth-child(2),
+.db-finding-table-file th:nth-child(2) { width: 20%; }
+.db-finding-table-content th:nth-child(3),
+.db-finding-table-file th:nth-child(3) { width: 18%; }
+.db-finding-table th:last-child { width: 120px; }
+
+.db-finding-table td.db-hide {
+  text-align: right;
+}
+
+.db-finding-table tr.db-hidden > td:not(.db-hide) {
+  opacity: 0.5;
+}
+
+.db-file-path {
+  display: block;
+}
+
+@media (max-width: 699px) {
+  .db-finding-table td.db-hide {
+    grid-column: 1 / -1;
+    padding-top: 0;
+  }
+
+  .db-finding-table-content tr,
+  .db-finding-table-file tr {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .db-finding-table-content td:nth-child(3),
+  .db-finding-table-file td:nth-child(3) {
+    grid-column: 1 / -1;
+    padding-top: 0;
+  }
 }
 
 .db-path {
