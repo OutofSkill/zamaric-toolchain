@@ -26,7 +26,7 @@ Verwandte Repos:
 
 ### Tests
 
-- Entwicklerseite, Board (pytest mit FastAPI-TestClient gegen echte SQLite in `tmp_path`): Verschieben nummeriert lückenlos neu (Index 0, über der Länge, in andere Spalte, unbekannte ID → `404 not_found`), Verschieben ändert `updated_at` nicht, Farbe/Titel/Text schon; PATCH ohne `color` behält die Farbe; Spalte löschen löscht ihre Karten; gelöschte höchste ID wird nicht neu vergeben (`autoincrement`); NUL/Steuerzeichen und IDs über 2⁶³ − 1 → `422`; `user_version` = 1, zu neue Datei wird nicht beschrieben; `backup_once()` legt eine Sicherung pro Tag an (Datum Berlin, stündliche Prüfung auch über die Zeitumstellung), räumt `.part`-Reste auf und behält nur 14
+- Entwicklerseite, Board (pytest mit FastAPI-TestClient gegen echte SQLite in `tmp_path`): Verschieben nummeriert lückenlos neu (Index 0, über der Länge, in andere Spalte, unbekannte ID → `404 not_found`), Verschieben ändert `updated_at` nicht, Farbe/Titel/Text schon; PATCH ohne `color` behält die Farbe; Spalte löschen löscht ihre Karten; gelöschte höchste ID wird nicht neu vergeben (`autoincrement`); NUL/Steuerzeichen und IDs über 2⁶³ − 1 → `422`; `user_version` = 2 (mit `hidden_finding` und `file_check_result`), zu neue Datei wird nicht beschrieben; `backup_once()` legt eine Sicherung pro Tag an (Datum Berlin, stündliche Prüfung auch über die Zeitumstellung), räumt `.part`-Reste auf und behält nur 14
 - Entwicklerseite, Python mit pytest: `repo.py` `parse_commits` (Body mit Leerzeilen, Merge-Commit ohne numstat, Umbenennung), `summarize_history` (Typ aus dem Präfix), `week_list` (52 bzw. 12 Wochen lückenlos, Wochenstart Montag in Berlin, Wochenwechsel ohne neuen Commit); `overview.py` (Teilfehler, Zeitlimit, `down_since`, Supabase beim Token-Erneuern weg → nur Supabase-Teile mit Fehler), `language_of`, `parse_batch`; `monitor.py` Ringpuffer (höchstens 1440 Einträge, Ausfall mit `ms` = null)
 - Entwicklerseite, Website: Rauchtest im Demo-Modus (`?demo`) mit jsdom: jede Route rendert, Board-Aktionen spiegeln sich im Demo-Speicher, HTML in Commit-Texten/Karten/README landet nicht als Element im DOM
 
@@ -38,7 +38,7 @@ Verwandte Repos:
 zamaric-toolchain/
 ├── upload/                   Upload-Tool (Website, Container, siehe unten)
 ├── dev/                      Entwicklerseite (Website, Container, siehe unten)
-└── shared/                   gemeinsamer Code: Python für Login, Sessions, Fehler, Prüfsummen sowie
+└── shared/                   gemeinsamer Code: Python für Login, Sessions, Fehler, Prüfsummen, Dateiinhalt sowie
                               content_rules.js (Inhaltsregeln für Upload-Tool und Entwicklerseite),
                               eingebunden über additional_contexts in den docker-compose-Dateien
 ```
@@ -108,12 +108,13 @@ upload/
 
 | Datei | Inhalt |
 |---|---|
-| `content_rules.js` | JavaScript für die Websites: Ähnlichkeit, Familien, Variantengruppen und Buchstabenvergleich, Einzähler-Tempo, Instrumente im Zusatz, doppelte und erste Buchstaben. Reine Funktionen ohne DOM, liefern Funde mit Text; Pfad und Meldungscode setzt der Aufrufer (`check.js`, später die Inhaltsprüfung der Entwicklerseite) |
+| `content_rules.js` | JavaScript für die Websites: Ähnlichkeit, Familien, Variantengruppen und Buchstabenvergleich, Einzähler-Tempo, Instrumente im Zusatz, doppelte und erste Buchstaben. Reine Funktionen ohne DOM, liefern Funde mit Text; Pfad und Meldungscode setzt der Aufrufer (`check.js` im Upload-Tool, `content_checks.js` in der Entwicklerseite) |
+| `file_content.py` | Dateiinhalt für Upload-Tool und Entwicklerseite: `mp3_duration_ms` (Länge mit `mutagen`, gerundet auf ms; nicht lesbar oder Länge ≤ 0 → `InvalidFileContent`, auch bei den Fehlern, die `mutagen` bei kaputten Dateien außerhalb von `MutagenError` wirft), `is_pdf_start` (`%PDF` am Anfang), `has_pdf_end` (`%%EOF` in den letzten 1024 Bytes). Braucht `mutagen` in beiden `requirements.txt` |
 | `web.py` | `create_app()`: FastAPI ohne `/docs`, alle Fehler-Handler, `require_own_origin`, `POST /api/login`, `POST /api/logout`, `GET /api/session` |
 | `sessions.py` | Login, Sessions, Login-Sperre, Token-Erneuerung (`fresh_client`). Liest `config.settings` des jeweiligen Tools |
 | `errors.py` | `ApiError`: Fehler mit festem Code für den Browser |
 | `queries.py` | `select_all`: alle Zeilen einer Tabelle seitenweise |
-| `storage.py` | Zugriff auf R2 über den Storage-Worker (`STORAGE_URL`) mit dem Token der Session: `upload_file` (mit SHA-256), `download_file`, `stored_sha256` (liest gestückelt und hasht), `list_files`, `all_files` (beide Buckets), `delete_files`. Worker-Antwort `401` → `unauthorized`, `403` → `forbidden`, sonst `storage_failed` (bei `404` als `StoredFileMissing`, nach außen gleich). Hoch- und Herunterladen warten höchstens 300 s, alles andere 30 s, jeweils pro Verbindungsaufbau und Lesevorgang |
+| `storage.py` | Zugriff auf R2 über den Storage-Worker (`STORAGE_URL`) mit dem Token der Session: `upload_file` (mit SHA-256), `download_file`, `stream_file` (liest gestückelt, nie ganz im Speicher; Aufrufer schließen ihn mit `contextlib.aclosing`), `list_files`, `all_files` (beide Buckets), `delete_files`. Worker-Antwort `401` → `unauthorized`, `403` → `forbidden`, sonst `storage_failed` (bei `404` als `StoredFileMissing`, nach außen gleich). Hoch- und Herunterladen warten höchstens 300 s, alles andere 30 s, jeweils pro Verbindungsaufbau und Lesevorgang |
 | `checksums.py` | `backfill_sha256`: Prüfsumme einer Datei nachtragen, `missing_sha256`, Bucket je Tabelle |
 | `files.py` | `remove_unused_files`: Dateiliste aus R2, `unused_files(files)` wählt die unbenutzten, der Worker löscht sie und prüft dabei selbst noch einmal. Auch als Hintergrund-Variante, die nur loggt |
 
@@ -349,7 +350,7 @@ Die Website schickt den geprüften Song mit den Angaben des Partners. Container 
    - Jeder `path` beginnt mit `Noten/` (PDF) bzw. `Playbacks/` (MP3) und endet auf `.pdf` bzw. `.mp3`.
    - `release_at` ist `null` oder ein ISO-Zeitpunkt mit Zeitzone.
 3. `paths` und `files` gleich lang, jeder Pfad im Manifest genau einmal in `paths`, keine zusätzlichen (`422`).
-4. Dateiinhalt prüfen: PDF beginnt mit `%PDF`, MP3 lässt sich mit `mutagen` lesen (`422`).
+4. Dateiinhalt prüfen (`shared/file_content.py`): PDF beginnt mit `%PDF` und hat `%%EOF` in den letzten 1024 Bytes, MP3 lässt sich mit `mutagen` lesen (`422`).
 5. `duration_ms` jeder MP3 mit `mutagen` neu messen und den Wert aus dem Manifest ersetzen. Danach prüfen, dass kein `letters[].position_ms` hinter der gemessenen Länge liegt (`422`). Von jeder Datei die SHA-256-Prüfsumme rechnen.
 6. Dateien über den Storage-Worker hochladen: MP3 (Playbacks und Einzähler) in den Bucket `audio` als `<uuid>.mp3`, PDF in den Bucket `sheet_music` als `<uuid>.pdf`, jeweils mit der Prüfsumme aus Schritt 5. R2 lehnt eine Datei ab, die unterwegs verändert wurde. Den Content-Type setzt der Worker fest auf `audio/mpeg` bzw. `application/pdf`, nie den aus der Anfrage. Der `path` aus dem Manifest dient nur der Zuordnung und taucht im Bucket nicht auf.
 7. `import_song` (siehe README von `zamaric-database` → „`import_song`“) mit dem Manifest aufrufen, `path` jeweils durch den Dateinamen im Bucket ersetzt (`<uuid>.mp3`, ohne Bucket-Namen), dazu `sha256` je Datei. Die zurückgegebene Song-ID schreibt Container 2 nur ins Log. Fehler übersetzt er so: `song_exists` → `409`, `invalid_manifest` → `422`, `forbidden` → `403`, alles andere → `502` mit `database_failed`.
@@ -486,7 +487,7 @@ Gilt für jeden Datei- und Ordnernamen und jeden Zeileninhalt, bevor irgendetwas
 
 ### Prüfregeln
 
-Laufen in der Website (`static/check.js`). Die Regeln, die nicht an Ordnern und Dateinamen hängen (Varianten, Buchstabenvergleich, Einzähler-Tempo, Instrumente im Zusatz, doppelte Buchstaben, erster Buchstabe), liegen in `shared/content_rules.js`, damit die Entwicklerseite dieselben Regeln nachträglich auf DB und Buckets anwenden kann. ⛔ = Fehler, blockiert den Upload · ⚠️ = Warnung, der Partner muss sie bestätigen
+Laufen in der Website (`static/check.js`). Die Regeln, die nicht an Ordnern und Dateinamen hängen (Varianten, Buchstabenvergleich, Einzähler-Tempo, Instrumente im Zusatz, doppelte Buchstaben, erster Buchstabe), liegen in `shared/content_rules.js`. Die Entwicklerseite wendet dieselben Regeln im Panel „Prüfungen“ auf die DB an (siehe [Bereiche der Website](#bereiche-der-website)). ⛔ = Fehler, blockiert den Upload · ⚠️ = Warnung, der Partner muss sie bestätigen
 
 Meldungen zu einer Datei stehen direkt bei der Datei in der Liste. Nur Meldungen ohne passende Zeile (Song, Ordner, Dateien an falscher Stelle) zeigt die Website als Kartenstapel „Allgemein“: erst alle Fehler, dann die Warnungen in der Reihenfolge von `warningOrder`. Gleiche Meldungen ab 4 Stück werden zu einer Karte zusammengefasst, bei Warnungen nur die aus `groupableWarnings`. Die übrigen Warnungen muss der Partner einzeln bestätigen. Der Überblick sammelt alle offenen Punkte vor dem Hochladen-Knopf.
 
@@ -498,7 +499,7 @@ Meldungen zu einer Datei stehen direkt bei der Datei in der Liste. Nur Meldungen
 | `unexpected_entry` | ⛔ | Etwas anderes als `Noten/` oder `Playbacks/` direkt im Song-Ordner |
 | `unexpected_folder` | ⛔ | Unterordner in `Noten/`, `Timestamps/`, `Einzaehler/` oder ein anderer als diese zwei in `Playbacks/` |
 | `wrong_file_type` | ⛔ | In `Noten/` nicht `.pdf`, in `Playbacks/` und `Einzaehler/` nicht `.mp3`, in `Timestamps/` nicht `.txt` |
-| `invalid_file_content` | ⛔ | Inhalt passt nicht zur Endung: PDF ohne `%PDF` am Anfang, MP3 ohne MP3-Kopf oder nicht abspielbar |
+| `invalid_file_content` | ⛔ | Inhalt passt nicht zur Endung: PDF ohne `%PDF` am Anfang oder ohne `%%EOF` in den letzten 1024 Bytes (Website und Container 2 prüfen gleich), MP3 ohne MP3-Kopf oder nicht abspielbar |
 | `empty_folder` | ⛔ | Einer der Ordner ist leer (nur erkennbar, wenn der Ordner per Drag & Drop kommt) |
 | `file_too_large` | ⛔ | Datei größer als 50 MB (Grenze von Supabase im Free-Plan) |
 
@@ -622,6 +623,9 @@ Container 2: api                (Python)
   GET  /api/overview            Startseite: alle Kennzahlen in einer Antwort
   /api/board/*                  Board → SQLite-Datei /data/board.sqlite3 (Volume board-data)
   /api/integrity, /api/files …  Prüfungen und Übersichten → RPCs der Migration dev_site
+  /api/content                  content_snapshot(), ausgewertet im Browser (content_checks.js)
+  /api/file-checks              Dateiprüfungen: jede Datei einmal aus R2 lesen, Ergebnis in SQLite
+  /api/hidden-findings          ausgeblendete Funde → SQLite (gleiche Datei wie das Board)
   /api/checksums                fehlende Prüfsummen nachtragen (aus dem Upload-Tool hierher umgezogen)
   /api/git/*, /api/readme       git log/show/ls-tree auf dem eingehängten .git
   /api/ci                       GitHub REST (Actions), nur lesender Token
@@ -629,7 +633,8 @@ Container 2: api                (Python)
   │
   ├── Supabase (Token des Admins, RLS gilt)
   ├── /repo.git (schreibgeschützt eingehängt: nur das .git des App-Repos zamaric auf dem Pi)
-  ├── /data (Volume board-data: Board und tägliche Sicherungen)
+  ├── /data (Volume board-data: Board, ausgeblendete Funde, Ergebnisse der Dateiprüfungen und tägliche Sicherungen)
+  ├── Storage-Worker → R2 (Dateiliste, Dateien lesen und löschen)
   └── api.github.com
 ```
 
@@ -645,12 +650,14 @@ dev/
 ├── api/                          Container 2 (Python, FastAPI), nutzt shared/
 │   ├── main.py                   create_app() mit Lifespan (startet/stoppt Messung und Board-Sicherung), bindet die Router ein
 │   ├── config.py                 Einstellungen aus den Umgebungsvariablen
-│   ├── board.py                  /api/board/*, SQLite-Datei und tägliche Sicherung
-│   ├── database.py               Integrität, Dateien, Prüfsummen, Speicher, Freigaben, Cron, Nachrichten
+│   ├── board.py                  /api/board/*, SQLite-Datei (Schema für alle Tabellen) und tägliche Sicherung
+│   ├── database.py               Integrität, Inhalt (/api/content), Dateien, Prüfsummen nachtragen, Speicher, Freigaben, Cron, Nachrichten
+│   ├── file_checks.py            /api/file-checks: Prüfsumme, MP3 und PDF in einem Durchgang, Ergebnisse in SQLite
+│   ├── hidden_findings.py        /api/hidden-findings: ausgeblendete Funde in SQLite
 │   ├── repo.py                   Commits, Statistik, README (git), CI (GitHub)
 │   ├── monitor.py                Antwortzeit: Hintergrund-Messung und /api/latency
 │   ├── overview.py               /api/overview, sammelt die Kennzahlen der anderen Module
-│   ├── requirements.txt          u. a. tzdata (Wochen nach deutscher Zeit, python:slim hat keine Zeitzonen)
+│   ├── requirements.txt          u. a. tzdata (Wochen nach deutscher Zeit, python:slim hat keine Zeitzonen), mutagen (MP3-Länge)
 │   └── Dockerfile                mit git, kopiert shared/*.py dazu
 ├── website/                      Container 1 (nginx)
 │   ├── static/
@@ -658,26 +665,29 @@ dev/
 │   │   ├── app.js                Gerüst: Navigation, Hash-Router, Login, request(), Markdown, Dialoge
 │   │   ├── overview.js           Übersicht (Startbereich)
 │   │   ├── board.js              Board
-│   │   ├── views.js              Repo, Datenbank, Nachrichten, Server
+│   │   ├── views.js              Repo, Datenbank (Panel „Prüfungen“), Nachrichten, Server
+│   │   ├── content_checks.js     Inhaltsprüfung: wertet content_snapshot() mit content_rules.js aus, Schlüssel der Funde (rein, ohne DOM)
 │   │   ├── demo.js               Beispieldaten für ?demo
 │   │   ├── style.css             Tokens, Gerüst, gemeinsame Klassen, Board
 │   │   ├── views.css             Bereiche aus views.js
 │   │   ├── overview.css          Übersicht (Präfix ov-)
-│   │   ├── content_rules.js      Symlink auf shared/content_rules.js (Vorbereitung für die Inhaltsprüfung, lokal über ?demo)
+│   │   ├── content_rules.js      Symlink auf shared/content_rules.js, importiert von content_checks.js (lokal für ?demo und die Tests)
 │   │   ├── fonts/Figtree.ttf
 │   │   └── vendor/
 │   │       ├── sortable.esm.js   SortableJS 1.15.6 (MIT), Drag & Drop
 │   │       ├── marked.esm.js     marked 15.0.12 (MIT), Markdown → HTML
-│   │       └── purify.es.js      DOMPurify 3.2.6 (Apache-2.0 / MPL-2.0), HTML bereinigen
+│   │       ├── purify.es.js      DOMPurify 3.2.6 (Apache-2.0 / MPL-2.0), HTML bereinigen
+│   │       └── sha256.min.js     js-sha256 1.0.0 (MIT), Schlüssel der Funde (Kopie aus dem Upload-Tool)
+│   ├── tests/                    Tests für content_checks.js (node --test)
 │   ├── nginx.conf
 │   ├── security_headers.conf
-│   ├── .dockerignore             hält Symlink und static/.claude aus dem Build-Kontext
+│   ├── .dockerignore             hält Symlink, Tests und static/.claude aus dem Build-Kontext
 │   └── Dockerfile                kopiert zusätzlich shared/content_rules.js dazu
 ├── docker-compose.yml            alle drei Container (NetBird, website, api)
 └── .env.example                  Vorlage für die eigene .env (nicht im Repo)
 ```
 
-- Die Vendor-Dateien sind unverändert von npm (über jsdelivr). DOMPurify heißt dort `purify.es.mjs`, hier `.js`: Die `mime.types` von nginx kennen `.mjs` nicht, der Browser würde das Modul sonst als `application/octet-stream` ablehnen.
+- Die Vendor-Dateien sind unverändert von npm (über jsdelivr). DOMPurify heißt dort `purify.es.mjs`, hier `.js`: Die `mime.types` von nginx kennen `.mjs` nicht, der Browser würde das Modul sonst als `application/octet-stream` ablehnen. `sha256.min.js` ist nötig, weil die Seite über `http://` läuft und der Browser `crypto.subtle` dort nicht anbietet.
 - `app.js` lädt `overview.js`, `board.js`, `views.js` und `demo.js` per dynamischem `import()`, weil diese ihrerseits aus `app.js` importieren.
 - Jeder Bereich hat die Form `renderX(container, { signal })`. Beim Wechsel des Bereichs bricht das `AbortSignal` ab und stoppt laufende Anfragen, Timer und Listener.
 
@@ -766,7 +776,18 @@ Alle Punkte des [Upload-Tools](#sicherheit) gelten hier genauso: feste Fehlercod
 
 Das Board liegt in `/data/board.sqlite3` im Docker-Volume `board-data`, nicht in Supabase. `board.py` legt Datei und Tabellen beim ersten Zugriff an, mit `journal_mode = wal`, `foreign_keys = on` und `busy_timeout` 5 s. Jeder Zugriff öffnet eine eigene Verbindung in einem Thread und läuft hinter einem Lock in einer Transaktion (`begin immediate`). Es gibt nur einen Worker, der Lock reicht also gegen gleichzeitiges Verschieben.
 
-**Schema-Stand:** steht in `pragma user_version` (derzeit `1`). Die Schritte stehen in `SCHEMA_STEPS` in `board.py`, eine spätere Änderung kommt als neuer Eintrag ans Ende und läuft beim nächsten Start genau einmal, jeweils in einer eigenen Transaktion. Ist die Datei neuer als der Code (z. B. nach dem Zurückgehen auf ein älteres Image), schreibt `board.py` nichts, loggt „Board-Datei hat Schema …“ und antwortet mit `500`.
+**Schema-Stand:** steht in `pragma user_version` (derzeit `2`). Die Schritte stehen in `SCHEMA_STEPS` in `board.py`, eine spätere Änderung kommt als neuer Eintrag ans Ende und läuft beim nächsten Start genau einmal, jeweils in einer eigenen Transaktion. Ist die Datei neuer als der Code (z. B. nach dem Zurückgehen auf ein älteres Image), schreibt `board.py` nichts, loggt „Board-Datei hat Schema …“ und antwortet mit `500` (`SchemaTooNew`).
+
+| Stand | Inhalt |
+|---|---|
+| 1 | `board_column`, `board_card` |
+| 2 | `hidden_finding`, `file_check_result` (Panel „Prüfungen“ im Bereich Datenbank) |
+
+**Zurück auf ein Image vor Stand 2:** Das alte Image lehnt die Datei ab (`SchemaTooNew`, Board antwortet mit `500`). Schritt 2 legt nur die zwei Tabellen an und ändert an Spalten und Karten nichts, `pragma user_version = 1` ist also unbedenklich. Damit ein späteres Update Schritt 2 wieder sauber ausführen kann (sonst scheitert `create table`), die zwei Tabellen gleich mit löschen. Dabei gehen die ausgeblendeten Funde und die gespeicherten Ergebnisse der Dateiprüfungen verloren, Board und Karten bleiben. Im Ordner `dev`, solange noch das neue Image gebaut ist:
+
+```bash
+docker compose run --rm --entrypoint python api -c "import sqlite3; c = sqlite3.connect('/data/board.sqlite3'); c.executescript('drop table if exists hidden_finding; drop table if exists file_check_result; pragma user_version = 1;')"
+```
 
 **`board_column`**: Spalten
 
@@ -791,6 +812,24 @@ Das Board liegt in `/data/board.sqlite3` im Docker-Volume `board-data`, nicht in
 
 Titel und Text dürfen keine Steuerzeichen enthalten außer Tab, Zeilenumbruch und Wagenrücklauf (sonst `422`). IDs in Pfad und Body müssen zwischen 1 und 2⁶³ − 1 liegen (sonst `422`).
 
+**`hidden_finding`**: ausgeblendete Funde des Panels „Prüfungen“, gelten auf jedem Gerät
+
+| Spalte | Typ | Regeln |
+|---|---|---|
+| `key` | text | Primärschlüssel, 64 Hex-Zeichen: SHA-256 von `JSON.stringify([kind, check, subject, detail])`, berechnet im Browser (`findingKey` in `content_checks.js`). Ändert sich der Fund, ändert sich der Schlüssel und der Fund ist wieder sichtbar |
+| `check_name` | text | Prüfung des Fundes, 1–64 Zeichen. Nur zur Info |
+| `hidden_at` | text (ISO-8601 UTC) | |
+
+Einträge zu Funden, die es nicht mehr gibt, bleiben liegen; sie sind klein und nirgends sichtbar.
+
+**`file_check_result`**: letztes vollständiges Ergebnis je Dateiprüfung
+
+| Spalte | Typ | Regeln |
+|---|---|---|
+| `check_name` | text | Primärschlüssel: `sha256_mismatch`, `mp3_invalid` oder `pdf_invalid` |
+| `result` | text | JSON (`json_valid`), Form wie ein Eintrag in `results` von `GET /api/file-checks` |
+| `finished_at` | text (ISO-8601 UTC) | |
+
 - **Verschieben:** `index` ab 0, zu groß heißt ans Ende. Ziel- und alte Spalte werden in derselben Transaktion lückenlos neu nummeriert, auch nach dem Löschen einer Karte oder Spalte.
 - **Sicherung:** Beim Start des Containers und danach stündlich prüft `backup_once()`, ob es für den Tag (Datum in Berlin) schon eine Sicherung gibt, und sichert sonst die Datei über die Backup-API von SQLite nach `/data/backups/board-JJJJ-MM-TT.sqlite3`. Stündlich statt alle 24 Stunden, damit Zeitumstellung, Laufzeit oder eine beim Booten noch falsche Uhr keinen Tag auslassen. Geschrieben wird zuerst in `….sqlite3.part`, dann umbenannt; ein alter `.part`-Rest des Tages wird vorher gelöscht, Reste anderer Tage beim Aufräumen. Es bleiben die neuesten 14, ältere werden gelöscht. Im Log steht „Board gesichert: …“, ein Fehler nur als „Board nicht gesichert (…)“. Die Sicherungen liegen im selben Volume. Abholen und Wiederherstellen siehe [Starten](#starten-1).
 
@@ -813,12 +852,16 @@ Für alle gilt die Tabelle unter [Upload-Tool → Endpunkte](#endpunkte) (`401`,
 | `DELETE` | `/api/board/cards/{id}` | `204` | `404` |
 | `POST` | `/api/board/cards/{id}/move` `{ column_id, index }` | `204` | `404`, `422` |
 | `GET` | `/api/integrity` | `{ checked_at, findings: [integrity_report(files)] }` | `502` |
+| `GET` | `/api/content` | Rückgabe von `content_snapshot()` unverändert: `{ generated_at, categories, levels, instruments, parts, instrument_parts, songs }` | `403`, `502 database_failed` |
+| `GET` | `/api/hidden-findings` | `{ hidden: [{ key, check_name, hidden_at }] }` | |
+| `POST` | `/api/hidden-findings` `{ key, check_name }` | `204`. Schon ausgeblendet: nichts passiert | `422` (`key` nicht `^[0-9a-f]{64}$`, `check_name` nicht `^[a-z0-9_]{1,64}$`) |
+| `DELETE` | `/api/hidden-findings/{key}` | `204` | `404`, `422` |
+| `GET` | `/api/file-checks` | `{ running, checks, total, done, failed, finished_at, aborted, last_run_results: { <check>: Ergebnis }, results: { <check>: Ergebnis } }`, verlängert die Session nicht. Ergebnis = `{ finished_at, complete, aborted, total, checked, skipped, failed, missing, findings: [{ check_name, severity, table_name, row_id, song_id, song_name, song_release_at, release_at, bucket, path, detail }] }` | |
+| `POST` | `/api/file-checks` `{ checks: ["sha256_mismatch" \| "mp3_invalid" \| "pdf_invalid", …] }` | `202`, wie `GET`. Läuft schon ein Durchgang, kommt dessen Stand, die Auswahl gilt dann nicht | `422` (leer oder unbekannte Prüfung) |
 | `GET` | `/api/files` | `{ unused: [unused_files(files)], missing: [missing_files(files)] }` | `502` |
 | `POST` | `/api/files/cleanup` | `{ removed }` | `401 unauthorized` / `403 forbidden` / `502 storage_failed` / `database_failed` |
 | `GET` | `/api/checksums` | `{ running, total, done, failed }`, verlängert die Session nicht | |
 | `POST` | `/api/checksums` | `202`, wie `GET`. Läuft schon ein Durchgang, kommt dessen Stand | |
-| `GET` | `/api/checksums/verify` | `{ running, total, done, failed, skipped, mismatches: [{ table_name, row_id, song_id, song_name, bucket, path }], finished_at, aborted }`, verlängert die Session nicht | |
-| `POST` | `/api/checksums/verify` | `202`, wie `GET`. Läuft schon ein Durchgang, kommt dessen Stand | |
 | `GET` | `/api/storage` | `{ buckets: [storage_usage(files)], largest: [largest_files(files, 20)] }` | `502` |
 | `GET` | `/api/releases` | `{ pending: [pending_releases()] }` | `502` |
 | `GET` | `/api/cron` | `{ runs: [cron_runs(50)] }` | `502` |
@@ -833,7 +876,11 @@ Für alle gilt die Tabelle unter [Upload-Tool → Endpunkte](#endpunkte) (`401`,
 
 **Prüfsummen nachtragen** (`backfill_missing_sha256`, aus dem Upload-Tool umgezogen): alle Zeilen in `count_in`, `playback` und `sheet_music` mit Datei, aber ohne Prüfsumme. Datei für Datei herunterladen, hashen, über `set_file_sha256` eintragen. Es läuft immer nur ein Durchgang. Fehlt eine Datei im Bucket, wird sie übersprungen und beim nächsten Durchgang wieder versucht. Endet mit der Session. Im Log steht am Ende „Prüfsummen nachgetragen: N, fehlgeschlagen: M“.
 
-**Prüfsummen prüfen** (`verify_all_sha256`): alle Zeilen in `count_in`, `playback` und `sheet_music` mit Datei, auch wartende. Jede Datei wird über den Storage-Worker aus R2 gelesen, gestückelt gehasht (`stored_sha256`, nie ganz im Speicher) und mit `sha256` der Zeile verglichen. Zeilen ohne Prüfsumme zählen als `skipped`, nicht abrufbare Dateien als `failed`, Abweichungen stehen mit Song und Datei in `mismatches`. Es läuft immer nur ein Durchgang, unabhängig vom Nachtragen. Er bricht ab, wenn die Session endet (`aborted: "session_ended"`), der Worker das Token ablehnt (`unauthorized`), der Account kein Admin ist (`forbidden`) oder Supabase nicht erreichbar ist (`database_failed`), ebenso nach 5 Dateien in Folge, die nicht abrufbar sind (`storage_failed`; Dateien, die in R2 fehlen, zählen dafür nicht), sonst `unexpected`. Jede Anfrage an den Worker wartet dabei höchstens 30 s auf Verbindung und jedes Datenstück. Ohne Abbruch ist `aborted` `null`. Das Ergebnis bleibt bis zum nächsten Durchgang oder Neustart des Containers im Speicher. Im Log steht am Ende „Prüfsummen geprüft: N, abweichend: M, nicht abrufbar: K, ohne Prüfsumme: L“, jede Abweichung zusätzlich als Warnung.
+**Dateiprüfungen** (`file_checks.py`, ersetzt das frühere „Prüfsummen prüfen“): wählbar `sha256_mismatch` (alle drei Tabellen), `mp3_invalid` (`count_in`, `playback`) und `pdf_invalid` (`sheet_music`), jeweils alle Zeilen mit Datei, auch wartende. Gelesen werden nur die Tabellen der gewählten Prüfungen. Jede Datei wird genau einmal über den Storage-Worker gestreamt (`stream_file`, nie ganz im Speicher): SHA-256, die ersten Bytes und die letzten 1024 Bytes, bei MP3 zusätzlich in eine temporäre Datei (bis 16 MiB im Speicher, darüber in `/tmp`), aus der `mutagen` die Länge misst. Zeilen ohne Prüfsumme zählen bei `sha256_mismatch` als `skipped`. Fehlt eine Datei in R2, zählt sie als `missing` (steht schon als `file_missing` in den DB-Regeln), andere nicht abrufbare als `failed` (enthält `missing`).
+
+- **Vollständig** (`complete`) ist eine Prüfung, wenn der Durchgang nicht abgebrochen ist und `checked + missing == total`. Nur vollständige Ergebnisse ersetzen `results[check]` und landen in `file_check_result` (SQLite), überstehen also einen Neustart. Jeder Durchgang, auch ein abgebrochener, steht in `last_run_results` (nur im Speicher).
+- **Abbruch** wie früher: Session vorbei (`session_ended`), Worker lehnt Token ab (`unauthorized`), kein Admin (`forbidden`), Supabase weg (`database_failed`), 5 Dateien in Folge nicht abrufbar (`storage_failed`; fehlende Dateien zählen nicht mit), Container beendet (`cancelled`), sonst `unexpected`. Jede Anfrage an den Worker wartet höchstens 30 s auf Verbindung und jedes Datenstück. Es läuft immer nur ein Durchgang, unabhängig vom Nachtragen.
+- **Log:** je Prüfung eine Zeile „Dateiprüfung <check>: geprüft N von M, nicht abrufbar K (davon fehlen in R2 L), übersprungen S, Funde F[, unvollständig]“, dazu eine Warnung je Datei, die aus einem anderen Grund als „fehlt“ nicht abrufbar war.
 
 **Übersicht** (`overview.py`): Alle Teile laufen parallel, jeder höchstens 15 s (sonst `{ error: "timeout" }`). Ein Fehler betrifft nur seinen Teil. Ist Supabase beim Erneuern des Tokens nicht erreichbar, bekommen nur die Supabase-Teile `database_failed`, Antwortzeit, GitHub und Repo kommen trotzdem.
 
@@ -864,7 +911,13 @@ Navigation über den Hash (`#overview` als Start, `#board`, `#repo`, `#database`
 - **Board:** Spalten nebeneinander, horizontal scrollbar. Spalten anlegen, inline umbenennen, über ⋯ verschieben oder am Griff ziehen, löschen (mit Rückfrage, wenn Karten drin sind). Karten mit Titel, Farbe und Markdown-Text im Editor (Schreiben/Vorschau, ⌘/Strg+Enter speichert), Spalte im Editor wählbar, per Drag & Drop innerhalb und zwischen Spalten. Änderungen erscheinen sofort, schlägt die Anfrage fehl, lädt das Board neu. Schlägt auch das Neuladen fehl, bleiben die Spalten stehen und eine Fehlerzeile mit „Erneut versuchen“ erscheint.
 - **Repo** (App-Repo `zamaric`): Verlauf (nach Tag, eine Zeile pro Commit mit Art als Chip, Hash, Uhrzeit, +/− Zeilen, „Mehr laden“, „gepullt vor …“ im Kopf), Statistik (Kennzahlen inkl. Autoren, Commits pro Woche ab dem ersten Commit, Sprachen neben Commit-Arten, meistgeänderte Dateien), README gerendert mit Inhaltsverzeichnis auf Lesebreite, GitHub (letzter Lauf mit Jobs und Schritten, ältere als Tabelle, lädt jede Minute nach, solange ein Lauf noch läuft, auch nach einem Fehler).
 - **Datenbank:**
-  - **Integrität:** Funde von `integrity_report(files)`, gruppiert nach Prüfung:
+  - **Prüfungen:** ein Panel über die volle Breite mit drei Abschnitten. Jede Prüfung ist eine eigene Zeile und läuft immer über das ganze Backend, nie nur über einen Song.
+    - **Zeile:** Status (Läuft, Fehlgeschlagen, Nicht geprüft, n Fehler / n Warnungen oder OK), Titel, „n ausgeblendet“, Erklärung, „geprüft vor …“, Knopf „n Funde“ zum Aufklappen der Tabelle und „Prüfen“. Zeilen mit Fehlern stehen oben, dann Warnungen, dann OK. „Prüfen“ prüft bei Datenbank und Inhalt die ganze Gruppe neu (ein Aufruf liefert alle Regeln). Läuft die Gruppe schon, wird der Auftrag gemerkt und danach genau einmal ausgeführt.
+    - **Kopf:** Fehler- und Warnungs-Chips über alle Zeilen (ohne Ausgeblendete), „Ausgeblendete zeigen (n)“ und „Alle prüfen“ (Datenbank und Inhalt, ohne Dateien; läuft beim Öffnen des Bereichs automatisch). „Keine Fehler“ nur, wenn Datenbank und Inhalt ein Ergebnis haben und nichts fehlgeschlagen ist, sonst „Läuft …“ bzw. „Unvollständig“ (auch nach einem abgebrochenen Datei-Durchgang).
+    - **Ausblenden:** Jeder Fund hat „Ausblenden“; gespeichert auf dem Pi (`hidden_finding`, siehe [Board (SQLite)](#board-sqlite)), gilt also auf jedem Gerät. Ändert sich der Fund (Prüfung, Betroffenes oder Detail), ist er wieder da. „Ausgeblendete zeigen“ blendet sie gedimmt mit „Einblenden“ ein. Ausblenden erscheint sofort, schlägt die Anfrage fehl, wird es zurückgenommen.
+    - **Stand** (Inhalt und Dateien): „sichtbar“, „kommt mit Freigabe <Datum>“, „wird mit Freigabe behoben“ oder „wartet bis <Datum>“ (siehe Inhalt). Funde mit „wird mit Freigabe behoben“ zählen bis dahin normal mit.
+    - **Ampel der Übersicht:** zählt weiter nur die DB-Regeln (`integrity_report`), ausgeblendete Funde eingeschlossen.
+  - **Abschnitt Datenbank:** Funde von `integrity_report(files)`, eine Zeile je `check_name`. Ein `check_name`, den die Website nicht kennt, bekommt eine eigene Zeile mit dem rohen Namen. In der Zeile „Prüfsumme fehlt“ steht der Knopf „Prüfsummen nachtragen“ (Fortschritt alle 1,5 s, „12 / 42“; ein Netzfehler wird nach 5 s erneut versucht, nach 3 Fehlern in Folge steht „Erneut versuchen“ da; am Ende laufen die DB-Regeln und Unbenutzte Dateien neu).
 
     | `check_name` | Schwere | Meldet |
     |---|---|---|
@@ -887,10 +940,40 @@ Navigation über den Hash (`#overview` als Start, `#board`, `#repo`, `#database`
     | `name_not_normalized` | warning | Songname, Verlag, Playback-Typ oder Einzähler-Name nicht in Unicode-Form NFC |
     | `whitespace_in_name` | warning | dieselben Namen mit doppelten Leerzeichen oder einem anderen Leerzeichen als dem normalen (z. B. geschütztes Leerzeichen), wie `whitespace_issue` beim Upload |
     | `default_level_missing` | error | In `level` fehlt „Normal“ in genau dieser Schreibweise (die App vergleicht exakt) |
-  - **Prüfsummen:** Knopf „Prüfsummen nachtragen“ im Kopf der Integrität, Fortschritt alle 1,5 s („12 / 42“). Ein Netzfehler wird nach 5 s erneut versucht, nach 3 Fehlern in Folge steht „Erneut versuchen“ da. Am Ende laden Integrität und Dateien neu.
-  - **Prüfsummen prüfen:** eigenes Panel unter der Integrität mit Knopf „Prüfsummen prüfen“, Fortschritt wie beim Nachtragen (gleicher Code, `backgroundJob` in `views.js`). Danach: „Alle stimmen“, „Nicht vollständig geprüft“ oder die Zahl der Abweichungen, dazu geprüft / nicht abrufbar / ohne Prüfsumme und der Zeitpunkt, darunter die Abweichungen als Tabelle. Das letzte Ergebnis steht auch nach dem Neuladen der Seite da.
-  - **Unbenutzte Dateien** (`unused_files(files)`), Knopf „Löschen“ mit Rückfrage, danach laden Dateien, Speicher und Integrität neu. Fehlende Dateien stehen nur in der Integrität (`file_missing`).
+  - **Abschnitt Inhalt:** `content_checks.js` wertet `content_snapshot()` im Browser mit den Regeln aus `shared/content_rules.js` aus, wie beim Upload. Namen werden vorher in Unicode-Form NFC gebracht. Je Song:
+    - **Freigegeben, ohne wartende Änderung:** ein Durchgang über die sichtbaren Zeilen, ohne Stand.
+    - **Freigegeben, mit wartender Änderung:** zwei Durchgänge. „Sichtbar“ = Zeilen mit `release_at` `null`. „Nach Freigabe“ = jede wartende Zeile mit `replaces_id` ersetzt die Zeile, auf die sie zeigt (ID der alten Zeile bleibt, wie bei `apply_song_changes`), wartende Zeilen ohne `replaces_id` kommen dazu. Fund in beiden → „sichtbar“, nur nach Freigabe → „kommt mit Freigabe <Datum>“, nur sichtbar → „wird mit Freigabe behoben“.
+    - **Wartender neuer Song:** ein Durchgang, Stand „wartet bis <Datum>“.
+
+    | Prüfung | Schwere | Meldet |
+    |---|---|---|
+    | `ambiguous_type_instrument` | error | Teil des `type` ist eine Instrumentenfamilie statt eines Instruments (wie beim Upload) |
+    | `duplicate_letter` | error | Buchstabe doppelt ohne `D.S.`/`D.C.` dazwischen |
+    | `unknown_type_instrument` | warning | Tippfehler im `type`, mit Vorschlag |
+    | `visibility_differs_from_type` | warning | Ein Instrument, das der `type` nennt, sieht das Playback nicht (`instrument_mode` und `display_playback`). Weitere Instrumente, die es zusätzlich sehen, sind erlaubt. Bei `ohne Drums` sind die Drum-Instrumente gemeint |
+    | `playback_without_letters` | warning | Playback ohne Buchstaben (entspricht `missing_timestamps`) |
+    | `first_letter_not_at_start` | warning | erster Buchstabe nicht bei 0:00 |
+    | `count_in_tempo_mismatch` | warning | Einzähler im falschen Tempo (wie beim Upload) |
+    | `letters_differ_between_variants` | warning | Buchstaben einer Variante weichen von der Hauptvariante der Gruppe ab |
+    | `letter_time_differs_between_variants` | warning | einzelner Buchstabe einer Variante mehr als 3 s neben der erwarteten Stelle |
+    | `part_without_viewers` | warning | Stimme mit Noten, die keinem Instrument zugeordnet ist. Ein Fund je Stimme über alle Songs (gezählt nach Freigabe aller wartenden Änderungen), daneben „n Notenblätter in m Songs“; die Zahlen gehören nicht zum Schlüssel |
+  - **Abschnitt Dateien:** die Dateiprüfungen aus `/api/file-checks` (siehe [Endpunkte](#endpunkte-1)). Gehören nicht zu „Alle prüfen“, weil sie jede Datei aus R2 laden. „Prüfen“ in einer Zeile startet einen Durchgang nur mit dieser Prüfung, „Alle Dateiprüfungen“ im Kopf des Abschnitts alle drei in einem Durchgang, mit Fortschritt wie beim Nachtragen (`backgroundJob` in `views.js`). Gezeigt wird das letzte vollständige Ergebnis (bleibt über Neustarts erhalten). Ist der letzte Durchgang neuer und unvollständig, steht darunter „Letzter Durchgang unvollständig (x von y geprüft, n nicht abrufbar, m Dateien fehlen in R2, abgebrochen: …, k Funde im abgebrochenen Lauf)“. Fehlende Dateien stehen auch beim vollständigen Ergebnis als Hinweis da.
+
+    | Prüfung | Schwere | Meldet |
+    |---|---|---|
+    | `sha256_mismatch` | error | SHA-256 der Datei in R2 weicht von `sha256` der Zeile ab. Zeilen ohne Prüfsumme werden übersprungen (sie meldet `missing_sha256`) |
+    | `mp3_invalid` | error / warning | error: `mutagen` kann die MP3 nicht lesen. warning: gemessene Länge weicht um mehr als 50 ms von `duration_ms` ab |
+    | `pdf_invalid` | error | PDF beginnt nicht mit `%PDF` oder hat kein `%%EOF` in den letzten 1024 Bytes |
+  - **Unbenutzte Dateien** (`unused_files(files)`), Knopf „Löschen“ mit Rückfrage, danach laden Dateien und Speicher neu und die DB-Regeln laufen erneut. Fehlende Dateien stehen nur in den DB-Regeln (`file_missing`).
   - **Speicher** je Bucket mit den 20 größten Dateien, **Wartende Freigaben**, **Cron-Läufe** (rechts neben den drei anderen, so viele Läufe wie in die Höhe passen, ältere aufklappbar; Meldung nur bei Fehlschlag).
 - **Nachrichten:** Verlauf aus `notification_feed()`, ein Panel pro Tag, eine Zeile pro Nachricht, mit Suche und Zustellstatus aus `status_code`.
 - **Server:** je ein Abschnitt für Supabase und Speicher mit aktueller Messung, Median, P95, Fehlmessungen (24 h), Verlauf als Linie mit roten Ausfällen, Ausfälle als Zeiträume, Tabelle pro Stunde. Aktualisiert sich jede Minute, solange der Tab sichtbar ist.
 - **Layout:** Alle Bereiche nutzen die volle Breite mit gleichem Rand und einem Abstand (`--gap`) zwischen allen Panels. Panels einer Zeile sind gleich hoch; Paare (`pair()`) stehen unter 1200 px untereinander. Die Übersicht passt ab 1200 × 600 px ohne Scrollen auf den Bildschirm. Fehlertexte (`errorMessage`) und Zeitangaben (`describeTime`) kommen zentral aus `app.js`. Neu-laden-Knöpfe gibt es nicht, die Seite neu zu laden reicht.
+
+### Tests
+
+`dev/website/tests/` testet `content_checks.js`: jede Inhaltsregel, beide Stände einer wartenden Änderung mit ihren Labels, wartende Songs, NFC und die Schlüssel der Funde (gleich nach der Freigabe, unabhängig von Label und Zahlen). Die Snapshots sind nachgebaut. Braucht nur Node, keine Pakete, und liegt außerhalb von `static/` (und per `.dockerignore` außerhalb des Build-Kontexts). Im Repo-Ordner:
+
+```bash
+node --test dev/website/tests/
+```
